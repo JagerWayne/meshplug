@@ -64,11 +64,33 @@ This document lists planned improvements organized by priority tier.
 
 ## Tier 2 (Medium Priority - Nice to Have)
 
-- [ ] **Memoization of expensive computations** - Memoize analysis results and selection statistics
-- [ ] **Responsive design improvements** - Better mobile support with touch-friendly controls
-- [ ] **Accessibility** - Add ARIA labels, improve keyboard navigation, add screen reader support
-- [ ] **Unit tests** - Add unit tests for geometry functions, repair operations, and CSG operations
-- [ ] **Code organization** - Split the large app.js file into smaller components
+- [x] **Memoization of expensive computations** - Memoize analysis results and selection statistics
+  - The edge index (the most expensive thing the app builds) is cached against
+    the geometry, keyed on the buffer version so a repair that rewrites the
+    index in place invalidates it correctly
+  - `analyzeMesh` is cached the same way and now shares one edge index between
+    the diagnostics, the hole detector and the component finder, instead of
+    building three
+  - The edge key is a number instead of a string, removing an allocation and a
+    hash per edge
+  - Measured: a repeat analysis of a 96,800 triangle mesh drops from 146 ms
+    to 0 ms
+- [x] **Responsive design improvements** - Better mobile support with touch-friendly controls
+  - The inspector becomes a bottom sheet on phones, with comfortable tap
+    targets
+- [x] **Accessibility** - Add ARIA labels, improve keyboard navigation, add screen reader support
+  - `aria-label` on every range input, the viewport and the shortcuts dialog
+  - The toast is a `role="status"` live region, the progress bar is a
+    `role="progressbar"`, the error screen is `role="alert"`
+  - A visible focus ring and `prefers-reduced-motion` support
+- [x] **Unit tests** - Add unit tests for geometry functions, repair operations, and CSG operations
+  - `tests/` - a Node test runner with no npm install, covering geometry,
+    repair, selection, the shell builder, CSG and the parsers
+  - `node tests/run.mjs` runs 36 assertions and exits non-zero on failure
+- [x] **Code organization** - Split the large app.js file into smaller components
+  - `src/panels.js` holds the five inspector steps as presentational
+    components; app.js shrank from 2134 to 1864 lines and owns the state
+  - The shared button style and the sample list moved to module scope
 
 ## Tier 3 (Lower Priority - Future Enhancements)
 
@@ -108,23 +130,31 @@ This document lists planned improvements organized by priority tier.
   - Keyboard shortcut overlay
   - Auto-save to IndexedDB with a restore prompt
   - Progressive, yielding file loading
+- **Tier 2 (all five items)**
+  - Memoization of the edge index and the mesh analysis
+  - Responsive bottom-sheet drawer and touch targets
+  - Accessibility: live regions, ARIA labels and roles, reduced motion
+  - A 36-assertion unit test suite in tests/
+  - The inspector panels split out of app.js
 
 ### In Progress
 - None yet
 
 ### Next Up
-1. Tier 2 - Memoization of expensive computations
-2. Tier 2 - Responsive design improvements
-3. Tier 2 - Accessibility
-4. Tier 2 - Unit tests
-5. Tier 2 - Code organisation
+1. Tier 3 - Virtual scrolling for large meshes
+2. Tier 3 - Additional file formats (3MF, AMF, glTF)
+3. Tier 3 - Advanced selection tools
+4. Tier 3 - Mesh comparison
+5. Tier 3 - Measurement tools
 
 ## Verification
 
-Each item is covered by a headless-Chrome test in `tasktemp/`:
+Each item is covered by a headless-Chrome test in `tasktemp/`, plus the unit
+suite in `tests/`:
 
 | test | what it proves |
 |---|---|
+| `node tests/run.mjs` | 36 unit assertions over geometry, repair, selection, CSG and the parsers |
 | `babel-check.mjs` | every module transpiles, no duplicate globals (including duplicate function names), the worker parses in its own scope |
 | `ui-test.mjs` | the full 5-step workflow still works end to end |
 | `worker-test.mjs` | the worker is live, returns identical geometry to the sync path, and drives the progress bar |
@@ -132,7 +162,7 @@ Each item is covered by a headless-Chrome test in `tasktemp/`:
 | `history-test.mjs` | the timeline lists operations and jumping between them restores the right state |
 | `rim-check.mjs` | the shell is still watertight with 0 folded triangles |
 | `tier1-test.mjs` | GPU/CPU parity, the preview flow, the shortcut overlay, progressive loading and the auto-save round trip |
-| `bench-test.mjs` | the GPU and CPU timings for smoothing and decimation |
+| `bench-test.mjs` | the GPU and CPU timings for smoothing, decimation and analysis |
 | `cpu-profile.mjs` | where the decimator spends its time |
 | `decim-quality.mjs` | the decimated mesh is still sound and the GPU metric agrees with the CPU |
 | `cdp.mjs` | the browser console stays free of errors |

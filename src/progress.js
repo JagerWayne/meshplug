@@ -9,21 +9,29 @@
 // ---------------------------------------------------------------------------
 const ProgressBar = ({ progress, label, onCancel }) => {
   const percentage = Math.round(progress * 100);
-  
+
   return (
-    <div className="fixed bottom-4 left-1/2 -translate-x-1/2 w-96 bg-[#0a0f1d] border border-cyan-500/30 rounded-xl p-4 shadow-2xl backdrop-blur-md z-50">
+    <div
+      role="progressbar"
+      aria-label={label}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={percentage}
+      aria-valuetext={`${label}: ${percentage}%`}
+      className="fixed bottom-4 left-1/2 -translate-x-1/2 w-96 bg-[#0a0f1d] border border-cyan-500/30 rounded-xl p-4 shadow-2xl backdrop-blur-md z-50"
+    >
       <div className="flex items-center justify-between mb-2">
         <span className="text-sm font-semibold text-cyan-300">{label}</span>
         <span className="text-xs font-mono text-cyan-400">{percentage}%</span>
       </div>
-      
+
       <div className="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
-        <div 
+        <div
           className="h-full bg-gradient-to-r from-cyan-500 to-cyan-400 transition-all duration-300 ease-out"
           style={{ width: `${percentage}%` }}
         />
       </div>
-      
+
       {onCancel && (
         <button
           onClick={onCancel}

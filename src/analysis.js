@@ -4,40 +4,70 @@
 
 // Builds a full edge index: every unique edge with its incidence count, the
 // faces that use it and the directed uses (used for winding consistency).
+//
+// The edge key is a number rather than a string. A string key meant one
+// allocation and one hash per edge, which is the single most expensive part
+// of every operation that walks the topology.
 function buildEdgeIndex(geometry) {
   const pos = geometry.attributes.position;
   const index = geometry.index;
   const triCount = index ? index.count / 3 : pos.count / 3;
+  const vertexCount = pos.count;
   const edges = new Map();
   const triVerts = new Uint32Array(triCount * 3);
+  // u * vertexCount + v is unique for an unordered pair and stays exact in
+  // a double as long as the vertex count is below a few million.
+  const key = (u, v) => (u < v ? u * vertexCount + v : v * vertexCount + u);
 
   for (let t = 0; t < triCount; t++) {
     const a = index ? index.getX(t * 3) : t * 3;
     const b = index ? index.getX(t * 3 + 1) : t * 3 + 1;
     const c = index ? index.getX(t * 3 + 2) : t * 3 + 2;
     triVerts[t * 3] = a; triVerts[t * 3 + 1] = b; triVerts[t * 3 + 2] = c;
-    const pairs = [[a, b], [b, c], [c, a]];
     for (let k = 0; k < 3; k++) {
-      const u = pairs[k][0], v = pairs[k][1];
-      const key = u < v ? `${u}_${v}` : `${v}_${u}`;
-      let rec = edges.get(key);
+      const u = k === 0 ? a : (k === 1 ? b : c);
+      const v = k === 0 ? b : (k === 1 ? c : a);
+      const k2 = key(u, v);
+      let rec = edges.get(k2);
       if (!rec) {
         rec = { u: Math.min(u, v), v: Math.max(u, v), count: 0, faces: [], dir: [] };
-        edges.set(key, rec);
+        edges.set(k2, rec);
       }
       rec.count++;
       rec.faces.push(t);
       rec.dir.push(u === rec.u ? 1 : -1);
     }
   }
-  return { edges, triVerts, triCount, vertexCount: pos.count };
+  return { edges, triVerts, triCount, vertexCount };
+}
+
+// ---------------------------------------------------------------------------
+// MEMOISATION
+//   The edge index is the most expensive thing the app builds and several
+//   steps need it, so it is cached against the geometry. Walking the
+//   topology twice then costs one pass instead of two.
+//
+//   The buffer versions are checked, because a repair such as "Fix Normals"
+//   rewrites the index in place. A stale edge index would report the old
+//   winding and quietly give the wrong answer.
+// ---------------------------------------------------------------------------
+const edgeIndexCache = new WeakMap();
+
+function cachedEdgeIndex(geometry) {
+  const index = geometry.index;
+  const version = index ? index.version : -1;
+  const entry = edgeIndexCache.get(geometry);
+  if (entry && entry.index === index && entry.version === version) return entry.value;
+  const value = buildEdgeIndex(geometry);
+  edgeIndexCache.set(geometry, { index, version, value });
+  return value;
 }
 
 // Chains a set of boundary edges (each used by exactly one face) into closed
 // loops. Shared by the mesh-wide hole detector and the selection outline.
-function traceBoundaryLoops(edgeMap, pos) {
+function traceBoundaryLoops(edgeMap, pos, vertexCount) {
   const adj = new Map();
-  const edgeKey = (a, b) => (a < b ? `${a}_${b}` : `${b}_${a}`);
+  const edgeKey = (a, b) => (a < b ? a * vertexCount + b : b * vertexCount + a);
   edgeMap.forEach((rec) => {
     if (rec.count !== 1) return;
     if (!adj.has(rec.u)) adj.set(rec.u, []);
@@ -88,9 +118,9 @@ function traceBoundaryLoops(edgeMap, pos) {
 // Traces the boundary loops (holes) of a mesh. Returns an array of loops with
 // their ordered vertex indices, area, centroid and bounding box.
 function findBoundaryLoops(geometry) {
-  const { edges, triVerts } = buildEdgeIndex(geometry);
+  const { edges, triVerts, vertexCount } = cachedEdgeIndex(geometry);
   const pos = geometry.attributes.position;
-  return traceBoundaryLoops(edges, pos);
+  return traceBoundaryLoops(edges, pos, vertexCount);
 }
 
 function makeLoopInfo(loop, pos) {
@@ -120,7 +150,7 @@ function makeLoopInfo(loop, pos) {
 
 // Union-find over triangles to split a mesh into connected components.
 function findComponents(geometry) {
-  const { edges, triVerts, triCount } = buildEdgeIndex(geometry);
+  const { edges, triVerts, triCount } = cachedEdgeIndex(geometry);
   const parent = new Int32Array(triCount);
   for (let i = 0; i < triCount; i++) parent[i] = i;
   const find = (a) => {
@@ -145,10 +175,37 @@ function findComponents(geometry) {
 }
 
 // Full diagnostic report for the Mesh Doctor panel.
+//
+// The report is cached against the geometry, because the panel asks for it
+// on every change and the hole markers need the same numbers. It depends on
+// the positions as well as the topology, so both buffer versions are
+// checked - a repair that rewrites either one invalidates the cache.
+const analysisCache = new WeakMap();
+
 function analyzeMesh(geometry) {
   if (!geometry || !geometry.attributes.position) return null;
   const pos = geometry.attributes.position;
-  const { edges, triCount } = buildEdgeIndex(geometry);
+  const index = geometry.index;
+  const entry = analysisCache.get(geometry);
+  if (entry
+    && entry.pos === pos && entry.posVersion === pos.version
+    && entry.index === index && entry.indexVersion === (index ? index.version : -1)) {
+    return entry.value;
+  }
+  const value = computeMeshAnalysis(geometry);
+  analysisCache.set(geometry, {
+    pos, posVersion: pos.version,
+    index, indexVersion: index ? index.version : -1,
+    value
+  });
+  return value;
+}
+
+function computeMeshAnalysis(geometry) {
+  const pos = geometry.attributes.position;
+  // One edge index, shared by the diagnostics, the hole detector and the
+  // component finder.
+  const { edges, triCount } = cachedEdgeIndex(geometry);
 
   let boundaryEdges = 0, nonManifoldEdges = 0, inconsistentWinding = 0, degenerate = 0;
   edges.forEach((rec) => {

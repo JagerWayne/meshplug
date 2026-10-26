@@ -142,7 +142,7 @@ function fillRegionBoundedBy(geometry, path, startFace, seedFace) {
   const pos = geometry.attributes.position;
   const triCount = mask.length;
   const { faceAdj } = buildAdjacency(geometry);
-  const { edges } = buildEdgeIndex(geometry);
+  const { edges } = cachedEdgeIndex(geometry);
 
   // Shared mesh edge for every adjacent face pair.
   const pairEdge = new Map();
@@ -622,19 +622,20 @@ function selectionBoundaryLoops(geometry, mask) {
   const idx = geometry.index;
   const pos = geometry.attributes.position;
   const triCount = idx.count / 3;
+  const vertexCount = pos.count;
   const edgeMap = new Map();
 
   for (let t = 0; t < triCount; t++) {
     if (!mask[t]) continue;
     const a = idx.getX(t * 3), b = idx.getX(t * 3 + 1), c = idx.getX(t * 3 + 2);
     [[a, b], [b, c], [c, a]].forEach(([u, v]) => {
-      const key = u < v ? `${u}_${v}` : `${v}_${u}`;
+      const key = u < v ? u * vertexCount + v : v * vertexCount + u;
       let rec = edgeMap.get(key);
       if (!rec) { rec = { u: Math.min(u, v), v: Math.max(u, v), count: 0 }; edgeMap.set(key, rec); }
       rec.count++;
     });
   }
-  return traceBoundaryLoops(edgeMap, pos);
+  return traceBoundaryLoops(edgeMap, pos, vertexCount);
 }
 
 // Adds (or removes) one ring of faces around the current selection.

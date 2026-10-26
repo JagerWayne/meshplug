@@ -649,7 +649,7 @@ function looksLikeSmoothedMesh(outPos, vertexCount, originalPos) {
 function computeSharpVertices(geometry, featureAngle) {
   const pos = geometry.attributes.position;
   const sharp = new Uint8Array(pos.count);
-  const { edges, triVerts } = buildEdgeIndex(geometry);
+  const { edges, triVerts } = cachedEdgeIndex(geometry);
   const cosLimit = Math.cos((featureAngle * Math.PI) / 180);
   const pA = new THREE.Vector3(), pB = new THREE.Vector3(), pC = new THREE.Vector3();
   const n1 = new THREE.Vector3(), n2 = new THREE.Vector3();

@@ -130,7 +130,7 @@ function fillHoles(geometry, { maxHoleArea = Infinity, mode = 'curved', smoothIt
 
   // Edge -> incident faces, used to orient the caps so that they agree with
   // the surrounding surface winding.
-  const edgeIndex = buildEdgeIndex(geometry);
+  const edgeIndex = cachedEdgeIndex(geometry);
   const faceNormalOf = (t) => {
     const a = edgeIndex.triVerts[t * 3], b = edgeIndex.triVerts[t * 3 + 1], c = edgeIndex.triVerts[t * 3 + 2];
     const va = new THREE.Vector3(pos.getX(a), pos.getY(a), pos.getZ(a));
@@ -355,7 +355,7 @@ function taubinSmooth(geometry, { iterations = 8, lambda = 0.52, mu = -0.54, fea
   const pA = new THREE.Vector3(), pB = new THREE.Vector3(), pC = new THREE.Vector3();
   const n1 = new THREE.Vector3(), n2 = new THREE.Vector3();
   const cosLimit = Math.cos((featureAngle * Math.PI) / 180);
-  const { edges, triVerts } = buildEdgeIndex(geometry);
+  const { edges, triVerts } = cachedEdgeIndex(geometry);
   edges.forEach((rec) => {
     if (rec.faces.length !== 2) return;
     const t1 = rec.faces[0], t2 = rec.faces[1];
@@ -886,7 +886,7 @@ function repairNormals(geometry) {
   geometry.computeVertexNormals();
   if (!geometry.index) return geometry;
   const { components, triVerts } = findComponents(geometry);
-  const { edges } = buildEdgeIndex(geometry);
+  const { edges } = cachedEdgeIndex(geometry);
   const index = geometry.index;
   const arr = index.array;
 

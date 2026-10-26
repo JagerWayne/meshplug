@@ -71,6 +71,10 @@ repair is going.
   with the error and a stack trace instead of going blank, and you can reload
   or try again without losing your place.
 - **Shortcut overlay** — press <kbd>?</kbd> for every keyboard shortcut.
+- **Accessible** — live regions announce toasts and progress, every control
+  has a label, and the app respects `prefers-reduced-motion`.
+- **Tested** — a 36-assertion unit suite runs with `node tests/run.mjs`, no
+  npm install required.
 
 ### Mesh Doctor
 

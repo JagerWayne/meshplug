@@ -247,7 +247,7 @@ function buildShell(sourceGeo, selectionMask, options = {}) {
   // solid, so flip the normals when the enclosed volume comes out negative.
   let orientationFlipped = false;
   if (autoOrient) {
-    const { edges } = buildEdgeIndex(sourceGeo);
+    const { edges } = cachedEdgeIndex(sourceGeo);
     let closed = edges.size > 0;
     edges.forEach((rec) => { if (rec.count !== 2) closed = false; });
     if (closed && geometrySignedVolume(sourceGeo) < 0) {
