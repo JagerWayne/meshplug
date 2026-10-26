@@ -2,6 +2,35 @@
 // 3. GEOMETRY UTILITIES - WELDING, CLEANING, TOPOLOGY & PROCEDURAL SCANS
 // ============================================================================
 
+// ---------------------------------------------------------------------------
+// PROGRESS HELPERS
+//   Parsing a multi-million triangle scan takes seconds, so the long jobs hand
+//   the work to the browser in slices. Between slices the event loop is
+//   released, which is what lets the progress bar actually paint instead of
+//   freezing until the job is over.
+// ---------------------------------------------------------------------------
+
+// Yields to the browser so the UI can repaint. A setTimeout (not a
+// microtask) is what actually lets a frame through.
+function yieldToUI() {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+// Reports progress and yields, but only when enough time has passed that the
+// repaint is worth the cost.
+function makeTicker(onProgress, total, label) {
+  let last = performance.now();
+  return async (done) => {
+    if (!onProgress) return false;
+    const now = performance.now();
+    if (now - last < 50) return false;
+    last = now;
+    onProgress(Math.min(1, done / Math.max(1, total)), label);
+    await yieldToUI();
+    return true;
+  };
+}
+
 // Merges vertices that sit within `tolerance` of each other and rebuilds the
 // index buffer. Scan exports almost always carry split vertices.
 function weldVertices(geometry, tolerance = 1e-4) {
@@ -23,6 +52,62 @@ function weldVertices(geometry, tolerance = 1e-4) {
       hashToIndex.set(key, idx);
     }
     indices.push(idx);
+  }
+  const welded = new THREE.BufferGeometry();
+  welded.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+  welded.setIndex(indices);
+  welded.computeVertexNormals();
+  welded.computeBoundingBox();
+  welded.computeBoundingSphere();
+  return welded;
+}
+
+// The adjacency list holds one entry per incident triangle, so the same
+// neighbour can appear several times. This returns the distinct neighbours
+// of every vertex.
+//
+// A marker array is used rather than a Set per vertex: building one Set per
+// vertex dominated the cost of both the CPU and the GPU smoothing paths.
+function uniqueNeighbours(vertexAdj, vertexCount) {
+  const marker = new Int32Array(vertexCount).fill(-1);
+  const out = new Array(vertexCount);
+  for (let v = 0; v < vertexCount; v++) {
+    const list = vertexAdj[v];
+    const unique = [];
+    for (let i = 0; i < list.length; i++) {
+      const n = list[i];
+      if (marker[n] === v) continue;
+      marker[n] = v;
+      unique.push(n);
+    }
+    out[v] = unique;
+  }
+  return out;
+}
+
+// Welds a geometry, reporting progress and yielding so the UI keeps painting
+// while a large scan is being welded together.
+async function weldVerticesAsync(geometry, onProgress) {
+  if (!onProgress) return weldVertices(geometry);
+  const pos = geometry.attributes.position;
+  if (!pos) return geometry;
+  const vertices = [];
+  const indices = [];
+  const hashToIndex = new Map();
+  const factor = 1 / 1e-4;
+  const tick = makeTicker(onProgress, pos.count, 'Welding vertices');
+
+  for (let i = 0; i < pos.count; i++) {
+    const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+    const key = `${Math.round(x * factor)}_${Math.round(y * factor)}_${Math.round(z * factor)}`;
+    let idx = hashToIndex.get(key);
+    if (idx === undefined) {
+      idx = vertices.length / 3;
+      vertices.push(x, y, z);
+      hashToIndex.set(key, idx);
+    }
+    indices.push(idx);
+    if ((i & 8191) === 0) await tick(i);
   }
   const welded = new THREE.BufferGeometry();
   welded.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));

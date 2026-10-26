@@ -86,13 +86,13 @@ function handleSmooth(data) {
 function handleDecimate(data) {
   const { geometryData, options } = data;
   const geometry = deserializeGeometry(geometryData);
-  
+
   self.postMessage({ type: 'progress', progress: 0.3 });
-  
+
   const result = decimateQEM(geometry, options);
-  
+
   self.postMessage({ type: 'progress', progress: 0.9 });
-  
+
   return { geometry: serializeGeometry(result) };
 }
 

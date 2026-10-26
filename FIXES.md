@@ -27,11 +27,40 @@ This document lists planned improvements organized by priority tier.
 
 ## Tier 1 (High Priority - Should Have)
 
-- [ ] **GPU-accelerated operations** - Use WebGL for mesh smoothing and decimation
-- [ ] **Preview before applying** - Show a preview of repair operations before applying them
-- [ ] **Keyboard shortcuts overlay** - Add a "?" key that shows a floating panel with all keyboard shortcuts
-- [ ] **Auto-save and recovery** - Auto-save project state periodically and recover from crashes
-- [ ] **Progressive loading for large files** - Show a progress bar when loading large STL/OBJ/PLY files
+- [x] **GPU-accelerated operations** - Use WebGL for mesh smoothing and decimation
+  - `src/gpu.js` - a float-texture ping-pong engine on the app's own renderer
+  - **Smoothing** runs entirely on the GPU as a Laplacian iteration, with the
+    same crease pinning and volume restoration as the CPU path. Verified to
+    match the CPU result to float32 precision (max difference 0.000019 mm on
+    a 65 mm part)
+  - **Decimation** evaluates the per-face error metric on the GPU, which makes
+    the whole operation 1.8x faster; the collapse loop stays on the CPU where
+    the topology updates belong. The GPU metric is single precision, so it
+    can pick a different collapse order - the mesh is the same quality, just
+    not bit for bit identical
+  - A result that fails validation (a broken shader, a readback that did not
+    happen) is rejected and the CPU path is used instead
+  - Measured: decimation of a 28,800 triangle mesh went from 20.0 s to
+    1.1 s on the CPU path and 0.6 s on the GPU path
+- [x] **Preview before applying** - Show a preview of repair operations before applying them
+  - A *Preview repairs* toggle in the Fix step makes every repair show its
+    result as a green ghost instead of applying it
+  - An Accept / Reject bar appears with the change; the scan is untouched
+    until the change is accepted
+- [x] **Keyboard shortcuts overlay** - Add a "?" key that shows a floating panel with all keyboard shortcuts
+  - `src/shortcuts.js` - one source of truth for the shortcuts, used by both
+    the panel and the key handler
+  - Opened with `?` or the *Keys* button in the header, closed with `Esc`
+- [x] **Auto-save and recovery** - Auto-save project state periodically and recover from crashes
+  - `src/autosave.js` - the scan is written to IndexedDB every 30 seconds
+  - The next time the app opens, a banner offers the last session back
+  - The shell and the selection are derived from the scan, so they are
+    rebuilt rather than stored
+- [x] **Progressive loading for large files** - Show a progress bar when loading large STL/OBJ/PLY files
+  - The parsers hand the work to the browser in slices and release the event
+    loop between them, so the progress bar actually paints
+  - File reading, parsing and welding each report their own progress
+  - Measured: a 900,000 vertex STL loads with 68 progress updates
 
 ## Tier 2 (Medium Priority - Nice to Have)
 
@@ -73,27 +102,37 @@ This document lists planned improvements organized by priority tier.
   - History timeline panel with click-to-jump
   - Drag-and-drop file loading onto the viewport
   - Error boundary with a recovery screen, plus global error handling
+- **Tier 1 (all five items)**
+  - GPU smoothing and GPU error metric for the decimator
+  - Preview before applying a repair
+  - Keyboard shortcut overlay
+  - Auto-save to IndexedDB with a restore prompt
+  - Progressive, yielding file loading
 
 ### In Progress
 - None yet
 
 ### Next Up
-1. Tier 1 - GPU-accelerated operations
-2. Tier 1 - Preview before applying
-3. Tier 1 - Keyboard shortcuts overlay
-4. Tier 1 - Auto-save and recovery
-5. Tier 1 - Progressive loading for large files
+1. Tier 2 - Memoization of expensive computations
+2. Tier 2 - Responsive design improvements
+3. Tier 2 - Accessibility
+4. Tier 2 - Unit tests
+5. Tier 2 - Code organisation
 
 ## Verification
 
-Each Tier 0 item is covered by a headless-Chrome test in `tasktemp/`:
+Each item is covered by a headless-Chrome test in `tasktemp/`:
 
 | test | what it proves |
 |---|---|
-| `babel-check.mjs` | every module transpiles, no duplicate globals, the worker parses in its own scope |
+| `babel-check.mjs` | every module transpiles, no duplicate globals (including duplicate function names), the worker parses in its own scope |
 | `ui-test.mjs` | the full 5-step workflow still works end to end |
 | `worker-test.mjs` | the worker is live, returns identical geometry to the sync path, and drives the progress bar |
 | `dnd-test.mjs` | the drop overlay, the drop handler, file rejection and the error boundary all fire |
 | `history-test.mjs` | the timeline lists operations and jumping between them restores the right state |
 | `rim-check.mjs` | the shell is still watertight with 0 folded triangles |
+| `tier1-test.mjs` | GPU/CPU parity, the preview flow, the shortcut overlay, progressive loading and the auto-save round trip |
+| `bench-test.mjs` | the GPU and CPU timings for smoothing and decimation |
+| `cpu-profile.mjs` | where the decimator spends its time |
+| `decim-quality.mjs` | the decimated mesh is still sound and the GPU metric agrees with the CPU |
 | `cdp.mjs` | the browser console stays free of errors |

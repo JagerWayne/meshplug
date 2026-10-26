@@ -347,7 +347,7 @@ function taubinSmooth(geometry, { iterations = 8, lambda = 0.52, mu = -0.54, fea
 
   const triCount = idx.count / 3;
   const { vertexAdj } = buildAdjacency(geometry);
-  const neighbours = vertexAdj.map((list) => Array.from(new Set(list)));
+  const neighbours = uniqueNeighbours(vertexAdj, pos.count);
 
   // Pin vertices that sit on a sharp crease so the smoothing does not melt
   // the detail that makes a scan readable.
@@ -425,7 +425,9 @@ function taubinSmooth(geometry, { iterations = 8, lambda = 0.52, mu = -0.54, fea
 // ---------------------------------------------------------------------------
 // DECIMATION - quadric error metric edge collapse
 // ---------------------------------------------------------------------------
-function decimateQEM(geometry, { targetRatio = 0.5, boundaryWeight = 8 } = {}) {
+// `precomputedQuadrics` lets the caller hand in the per-face error metric
+// when it has already been evaluated on the GPU.
+function decimateQEM(geometry, { targetRatio = 0.5, boundaryWeight = 8, precomputedQuadrics = null } = {}) {
   if (!geometry || !geometry.index || !geometry.attributes.position) return geometry;
   const pos = geometry.attributes.position;
   const idx = geometry.index;
@@ -454,26 +456,32 @@ function decimateQEM(geometry, { targetRatio = 0.5, boundaryWeight = 8 } = {}) {
     vNeighbours[c].add(a); vNeighbours[c].add(b);
   }
 
-  // Face quadrics: K^T K * area with K = [x y z 1].
-  const faceQ = new Float64Array(triCount * 10);
-  for (let t = 0; t < triCount; t++) {
-    const a = faces[t * 3], b = faces[t * 3 + 1], c = faces[t * 3 + 2];
-    pA.set(px[a], py[a], pz[a]); pB.set(px[b], py[b], pz[b]); pC.set(px[c], py[c], pz[c]);
-    e1.subVectors(pB, pA); e2.subVectors(pC, pA);
-    fn.crossVectors(e1, e2);
-    const area = fn.length() * 0.5;
-    fn.normalize();
-    const o = t * 10;
-    faceQ[o] = fn.x * fn.x * area;
-    faceQ[o + 1] = fn.x * fn.y * area;
-    faceQ[o + 2] = fn.x * fn.z * area;
-    faceQ[o + 3] = fn.x * area;
-    faceQ[o + 4] = fn.y * fn.y * area;
-    faceQ[o + 5] = fn.y * fn.z * area;
-    faceQ[o + 6] = fn.y * area;
-    faceQ[o + 7] = fn.z * fn.z * area;
-    faceQ[o + 8] = fn.z * area;
-    faceQ[o + 9] = area;
+  // Face quadrics: K^T K * area with K = [x y z 1]. When the GPU has already
+  // evaluated them they are handed in, which saves a full pass over the mesh.
+  let faceQ = null;
+  if (precomputedQuadrics && precomputedQuadrics.length === triCount * 10) {
+    faceQ = precomputedQuadrics;
+  } else {
+    faceQ = new Float64Array(triCount * 10);
+    for (let t = 0; t < triCount; t++) {
+      const a = faces[t * 3], b = faces[t * 3 + 1], c = faces[t * 3 + 2];
+      pA.set(px[a], py[a], pz[a]); pB.set(px[b], py[b], pz[b]); pC.set(px[c], py[c], pz[c]);
+      e1.subVectors(pB, pA); e2.subVectors(pC, pA);
+      fn.crossVectors(e1, e2);
+      const area = fn.length() * 0.5;
+      fn.normalize();
+      const o = t * 10;
+      faceQ[o] = fn.x * fn.x * area;
+      faceQ[o + 1] = fn.x * fn.y * area;
+      faceQ[o + 2] = fn.x * fn.z * area;
+      faceQ[o + 3] = fn.x * area;
+      faceQ[o + 4] = fn.y * fn.y * area;
+      faceQ[o + 5] = fn.y * fn.z * area;
+      faceQ[o + 6] = fn.y * area;
+      faceQ[o + 7] = fn.z * fn.z * area;
+      faceQ[o + 8] = fn.z * area;
+      faceQ[o + 9] = area;
+    }
   }
 
   const qError = (q, o, x, y, z) =>
@@ -481,13 +489,16 @@ function decimateQEM(geometry, { targetRatio = 0.5, boundaryWeight = 8 } = {}) {
     q[o + 4] * y * y + 2 * q[o + 5] * y * z + 2 * q[o + 6] * y +
     q[o + 7] * z * z + 2 * q[o + 8] * z + q[o + 9];
 
-  // Edge -> quadric accumulator (sum of the two incident faces).
+  // Edge -> quadric accumulator (sum of the two incident faces). The key is
+  // a number rather than a string: string keys meant one allocation and one
+  // hash per edge, which dominated the whole decimation on a large mesh.
   const edgeFaces = new Map();
-  const ekey = (a, b) => (a < b ? `${a}_${b}` : `${b}_${a}`);
+  const ekey = (a, b) => (a < b ? a * vCount + b : b * vCount + a);
   for (let t = 0; t < triCount; t++) {
-    const tri = [faces[t * 3], faces[t * 3 + 1], faces[t * 3 + 2]];
+    const a0 = faces[t * 3], b0 = faces[t * 3 + 1], c0 = faces[t * 3 + 2];
     for (let k = 0; k < 3; k++) {
-      const u = tri[k], v = tri[(k + 1) % 3];
+      const u = k === 0 ? a0 : (k === 1 ? b0 : c0);
+      const v = k === 0 ? b0 : (k === 1 ? c0 : a0);
       const key = ekey(u, v);
       let rec = edgeFaces.get(key);
       if (!rec) { rec = { u: Math.min(u, v), v: Math.max(u, v), faces: [], q: new Float64Array(10) }; edgeFaces.set(key, rec); }
@@ -552,18 +563,50 @@ function decimateQEM(geometry, { targetRatio = 0.5, boundaryWeight = 8 } = {}) {
   let liveTris = triCount;
   let liveVerts = vCount;
 
+  // Scratch vectors, reused so the inner loop never allocates.
+  const nrmA = new THREE.Vector3(), nrmB = new THREE.Vector3();
+  const nrmC = new THREE.Vector3(), nrmD = new THREE.Vector3();
+
   const faceNormal = (t, out) => {
     const a = faces[t * 3], b = faces[t * 3 + 1], c = faces[t * 3 + 2];
     out.set(0, 0, 0);
     if (!alive[a] || !alive[b] || !alive[c]) return null;
     pA.set(px[a], py[a], pz[a]); pB.set(px[b], py[b], pz[b]); pC.set(px[c], py[c], pz[c]);
-    out.crossVectors(new THREE.Vector3().subVectors(pB, pA), new THREE.Vector3().subVectors(pC, pA));
+    out.crossVectors(nrmC.subVectors(pB, pA), nrmD.subVectors(pC, pA));
     if (out.lengthSq() < 1e-18) return null;
     out.normalize();
     return out;
   };
 
-  const nrmA = new THREE.Vector3(), nrmB = new THREE.Vector3();
+  // Takes a face out of a vertex's face list. The list is short, so a
+  // linear scan is the cheapest way to do it.
+  const removeFaceFrom = (list, t) => {
+    const i = list.indexOf(t);
+    if (i >= 0) list.splice(i, 1);
+  };
+
+  // The edge -> faces map is kept in step with the topology. That makes
+  // re-pricing an edge a lookup instead of a scan over every face of the
+  // vertex, which is what used to make the decimator crawl.
+  const removeFaceFromEdge = (t, u, v) => {
+    const key = ekey(u, v);
+    const rec = edgeFaces.get(key);
+    if (!rec) return;
+    const i = rec.faces.indexOf(t);
+    if (i >= 0) rec.faces.splice(i, 1);
+    if (!rec.faces.length) edgeFaces.delete(key);
+  };
+
+  const moveFaceToEdge = (t, oldU, oldV, newU, newV) => {
+    removeFaceFromEdge(t, oldU, oldV);
+    const key = ekey(newU, newV);
+    let rec = edgeFaces.get(key);
+    if (!rec) {
+      rec = { u: Math.min(newU, newV), v: Math.max(newU, newV), faces: [], q: new Float64Array(10) };
+      edgeFaces.set(key, rec);
+    }
+    if (rec.faces.indexOf(t) < 0) rec.faces.push(t);
+  };
 
   while (liveTris > targetTris && heap.length) {
     const item = pop();
@@ -585,26 +628,28 @@ function decimateQEM(geometry, { targetRatio = 0.5, boundaryWeight = 8 } = {}) {
     }
 
     // Reject collapses that would flip a triangle.
+    // Only the faces around the vertex that is being removed change shape -
+    // the survivor keeps its position, so the faces around it are untouched.
+    // Checking only those turns this from the most expensive part of the
+    // decimator into a short loop.
     let flips = false;
-    const checkFaces = new Set([...vFaces[keep], ...vFaces[kill]]);
-    checkFaces.forEach((t) => {
-      if (flips || !faceAlive[t]) return;
+    const killFaceList = vFaces[kill];
+    for (let fi = 0; fi < killFaceList.length; fi++) {
+      const t = killFaceList[fi];
+      if (flips || !faceAlive[t]) continue;
       const before = faceNormal(t, nrmA);
-      if (!before) return;
+      if (!before) continue;
       const a = faces[t * 3], b = faces[t * 3 + 1], c = faces[t * 3 + 2];
-      const saved = [px[a], py[a], pz[a], px[b], py[b], pz[b], px[c], py[c], pz[c]];
-      const rep = (v) => (v === kill ? keep : v);
-      const a2 = rep(a), b2 = rep(b), c2 = rep(c);
-      if (a2 === b2 || b2 === c2 || a2 === c2) return; // degenerate -> allowed
+      const a2 = a === kill ? keep : a;
+      const b2 = b === kill ? keep : b;
+      const c2 = c === kill ? keep : c;
+      if (a2 === b2 || b2 === c2 || a2 === c2) continue; // degenerate -> allowed
       pA.set(px[a2], py[a2], pz[a2]); pB.set(px[b2], py[b2], pz[b2]); pC.set(px[c2], py[c2], pz[c2]);
-      nrmB.crossVectors(new THREE.Vector3().subVectors(pB, pA), new THREE.Vector3().subVectors(pC, pA));
-      if (nrmB.lengthSq() < 1e-18) return;
+      nrmB.crossVectors(nrmC.subVectors(pB, pA), nrmD.subVectors(pC, pA));
+      if (nrmB.lengthSq() < 1e-18) continue;
       nrmB.normalize();
       if (nrmA.dot(nrmB) < 0.05) flips = true;
-      px[a] = saved[0]; py[a] = saved[1]; pz[a] = saved[2];
-      px[b] = saved[3]; py[b] = saved[4]; pz[b] = saved[5];
-      px[c] = saved[6]; py[c] = saved[7]; pz[c] = saved[8];
-    });
+    }
     if (flips) continue;
 
     // Perform the collapse: kill -> keep.
@@ -626,12 +671,32 @@ function decimateQEM(geometry, { targetRatio = 0.5, boundaryWeight = 8 } = {}) {
       if (a2 === b2 || b2 === c2 || a2 === c2) {
         faceAlive[t] = 0;
         liveTris--;
+        // The face has to leave the lists of all three of its vertices and
+        // out of all three of its edges, otherwise those lists grow for the
+        // rest of the run and every later scan over them gets slower.
+        removeFaceFrom(vFaces[a], t);
+        removeFaceFrom(vFaces[b], t);
+        removeFaceFrom(vFaces[c], t);
+        removeFaceFromEdge(t, a, b);
+        removeFaceFromEdge(t, b, c);
+        removeFaceFromEdge(t, c, a);
         return;
       }
       faces[t * 3] = a2; faces[t * 3 + 1] = b2; faces[t * 3 + 2] = c2;
-      if (!vFaces[a2].includes(t)) vFaces[a2].push(t);
-      if (!vFaces[b2].includes(t)) vFaces[b2].push(t);
-      if (!vFaces[c2].includes(t)) vFaces[c2].push(t);
+      // Only the survivor's list needs the face: the other two vertices did
+      // not change, so they already have it.
+      removeFaceFrom(vFaces[kill], t);
+      vFaces[keep].push(t);
+      // The edges that ran through the killed vertex now run through the
+      // survivor.
+      const oldEdges = [[a, b], [b, c], [c, a]];
+      const newEdges = [[a2, b2], [b2, c2], [c2, a2]];
+      for (let k = 0; k < 3; k++) {
+        const [ou, ov] = oldEdges[k];
+        const [nu, nv] = newEdges[k];
+        if (ou === nu && ov === nv) continue;
+        moveFaceToEdge(t, ou, ov, nu, nv);
+      }
     });
 
     alive[kill] = 0;
@@ -645,15 +710,9 @@ function decimateQEM(geometry, { targetRatio = 0.5, boundaryWeight = 8 } = {}) {
         rec2 = { u: Math.min(keep, n), v: Math.max(keep, n), faces: [], q: new Float64Array(10) };
         edgeFaces.set(key, rec2);
       }
-      rec2.faces = [];
       rec2.q.fill(0);
-      const shared = vFaces[keep].filter((t) => {
-        const a = faces[t * 3], b = faces[t * 3 + 1], c = faces[t * 3 + 2];
-        return (a === keep && b === n) || (b === keep && c === n) || (c === keep && a === n) ||
-          (a === n && b === keep) || (b === n && c === keep) || (c === n && a === keep);
-      });
-      shared.forEach((t) => {
-        rec2.faces.push(t);
+      // The edge map already knows which faces sit on this edge.
+      rec2.faces.forEach((t) => {
         const o = t * 10;
         for (let q = 0; q < 10; q++) rec2.q[q] += faceQ[o + q];
       });
@@ -661,7 +720,7 @@ function decimateQEM(geometry, { targetRatio = 0.5, boundaryWeight = 8 } = {}) {
         const t = rec2.faces[0];
         const a = faces[t * 3], b = faces[t * 3 + 1], c = faces[t * 3 + 2];
         pA.set(px[a], py[a], pz[a]); pB.set(px[b], py[b], pz[b]); pC.set(px[c], py[c], pz[c]);
-        fn.crossVectors(new THREE.Vector3().subVectors(pB, pA), new THREE.Vector3().subVectors(pC, pA)).normalize();
+        fn.crossVectors(nrmC.subVectors(pB, pA), nrmD.subVectors(pC, pA)).normalize();
         const d = -fn.dot(pA);
         const w = boundaryWeight;
         rec2.q[0] += w * fn.x * fn.x; rec2.q[1] += w * fn.x * fn.y; rec2.q[2] += w * fn.x * fn.z;

@@ -2,9 +2,26 @@
 // 4. MESH PARSERS & EXPORTERS  (STL / OBJ / PLY  ->  STL / OBJ / STEP)
 // ============================================================================
 
+// Reads a File into an ArrayBuffer, reporting the download progress.
+function readFileWithProgress(file, onProgress) {
+  return new Promise((resolve, reject) => {
+    if (!onProgress || !file.size) {
+      file.arrayBuffer().then(resolve, reject);
+      return;
+    }
+    const reader = new FileReader();
+    reader.onprogress = (e) => {
+      if (e.lengthComputable) onProgress(e.loaded / e.total, 'Reading file');
+    };
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error('Could not read the file'));
+    reader.readAsArrayBuffer(file);
+  });
+}
+
 // Reads a binary or ASCII STL. Facet normals from the file are ignored and
 // recomputed from the triangle winding.
-function parseSTL(buffer) {
+async function parseSTL(buffer, onProgress) {
   if (!buffer || buffer.byteLength === 0) throw new Error('Empty file');
   const view = new DataView(buffer);
   const triCount = buffer.byteLength >= 84 ? view.getUint32(80, true) : 0;
@@ -16,57 +33,65 @@ function parseSTL(buffer) {
   if (isBinary) {
     const positions = new Float32Array(triCount * 9);
     let offset = 84;
+    const tick = makeTicker(onProgress, triCount, 'Reading triangles');
     for (let i = 0; i < triCount; i++) {
       offset += 12; // stored facet normal
       for (let j = 0; j < 9; j++) { positions[i * 9 + j] = view.getFloat32(offset, true); offset += 4; }
       offset += 2; // attribute byte count
+      if ((i & 8191) === 0) await tick(i);
     }
     geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
   } else {
     const text = new TextDecoder().decode(buffer);
+    const lines = text.split('\n');
     const positions = [];
-    text.split('\n').forEach(line => {
-      const parts = line.trim().split(/\s+/);
+    const tick = makeTicker(onProgress, lines.length, 'Reading vertices');
+    for (let i = 0; i < lines.length; i++) {
+      const parts = lines[i].trim().split(/\s+/);
       if (parts[0] === 'vertex') {
         const x = parseFloat(parts[1]), y = parseFloat(parts[2]), z = parseFloat(parts[3]);
         if (!isNaN(x) && !isNaN(y) && !isNaN(z)) positions.push(x, y, z);
       }
-    });
+      if ((i & 4095) === 0) await tick(i);
+    }
     if (positions.length < 9) throw new Error('No triangles found');
     geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   }
   if (!geo.attributes.position || geo.attributes.position.count < 3) throw new Error('No triangles found');
-  const welded = weldVertices(geo);
+  const welded = await weldVerticesAsync(geo, onProgress);
   welded.computeBoundingBox();
   welded.computeBoundingSphere();
   return welded;
 }
 
 // Reads a Wavefront OBJ (triangulates n-gons with a fan).
-function parseOBJ(text) {
+async function parseOBJ(text, onProgress) {
   const verts = [], positions = [];
-  text.split('\n').forEach(line => {
-    const parts = line.trim().split(/\s+/);
+  const lines = text.split('\n');
+  const tick = makeTicker(onProgress, lines.length, 'Reading faces');
+  for (let i = 0; i < lines.length; i++) {
+    const parts = lines[i].trim().split(/\s+/);
     if (parts[0] === 'v') {
       const x = parseFloat(parts[1]), y = parseFloat(parts[2]), z = parseFloat(parts[3]);
       if (!isNaN(x) && !isNaN(y) && !isNaN(z)) verts.push(new THREE.Vector3(x, y, z));
     } else if (parts[0] === 'f') {
       const face = [];
-      for (let i = 1; i < parts.length; i++) {
-        const idx = parseInt(parts[i].split('/')[0], 10) - 1;
+      for (let k = 1; k < parts.length; k++) {
+        const idx = parseInt(parts[k].split('/')[0], 10) - 1;
         if (!isNaN(idx) && verts[idx]) face.push(verts[idx]);
       }
-      for (let i = 1; i < face.length - 1; i++) {
-        positions.push(face[0].x, face[0].y, face[0].z, face[i].x, face[i].y, face[i].z, face[i + 1].x, face[i + 1].y, face[i + 1].z);
+      for (let k = 1; k < face.length - 1; k++) {
+        positions.push(face[0].x, face[0].y, face[0].z, face[k].x, face[k].y, face[k].z, face[k + 1].x, face[k + 1].y, face[k + 1].z);
       }
     }
-  });
+    if ((i & 4095) === 0) await tick(i);
+  }
   if (positions.length < 9) throw new Error('No triangles found');
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
-  const welded = weldVertices(geo);
+  const welded = await weldVerticesAsync(geo, onProgress);
   welded.computeBoundingBox();
   welded.computeBoundingSphere();
   return welded;
@@ -82,7 +107,7 @@ const PLY_TYPES = {
 };
 
 // Reads ASCII and binary-little/big-endian PLY meshes.
-function parsePLY(buffer) {
+async function parsePLY(buffer, onProgress) {
   if (!buffer || buffer.byteLength === 0) throw new Error('Empty file');
   const bytes = new Uint8Array(buffer);
   const headerText = new TextDecoder().decode(bytes.slice(0, Math.min(bytes.length, 65536)));
@@ -141,6 +166,9 @@ function parsePLY(buffer) {
     const body = new TextDecoder().decode(bytes.slice(bodyOffset));
     const rows = body.split(/\r?\n/).filter((l) => l.trim().length);
     let row = 0;
+    const total = elements.reduce((s, e) => s + e.count, 0);
+    const tick = makeTicker(onProgress, total, 'Reading vertices');
+    let done = 0;
     for (const el of elements) {
       for (let i = 0; i < el.count; i++) {
         const tokens = rows[row++].trim().split(/\s+/);
@@ -155,10 +183,14 @@ function parsePLY(buffer) {
           for (let k = 0; k < n; k++) idx.push(parseInt(tokens[1 + k], 10));
           faces.push(idx);
         }
+        if ((++done & 4095) === 0) await tick(done);
       }
     }
   } else {
     let offset = bodyOffset;
+    const total = elements.reduce((s, e) => s + e.count, 0);
+    const tick = makeTicker(onProgress, total, 'Reading vertices');
+    let done = 0;
     for (const el of elements) {
       const propBytes = el.properties.reduce((s, p) => s + (p.kind === 'list' ? 1 : PLY_TYPES[p.type] || 4), 0);
       for (let i = 0; i < el.count; i++) {
@@ -185,9 +217,13 @@ function parsePLY(buffer) {
           }
           faces.push(idx);
           offset = o;
+          done++;
+          if ((done & 4095) === 0) await tick(done);
           continue;
         }
         offset += propBytes;
+        done++;
+        if ((done & 4095) === 0) await tick(done);
       }
     }
   }
@@ -200,27 +236,44 @@ function parsePLY(buffer) {
     for (let i = 1; i < f.length - 1; i++) tri.push(f[0], f[i], f[i + 1]);
   });
   if (tri.length) geo.setIndex(tri);
-  const welded = weldVertices(geo);
+  const welded = await weldVerticesAsync(geo, onProgress);
   welded.computeBoundingBox();
   welded.computeBoundingSphere();
   return welded;
 }
 
 // Dispatches to the right parser based on the file extension / signature.
-async function parseMeshFile(file) {
+// `onProgress(fraction, label)` is called throughout so a long load shows
+// real progress instead of a frozen page.
+async function parseMeshFile(file, onProgress) {
   const name = (file.name || '').toLowerCase();
-  const buffer = await file.arrayBuffer();
-  if (name.endsWith('.stl')) return parseSTL(buffer);
-  if (name.endsWith('.obj')) return parseOBJ(new TextDecoder().decode(buffer));
-  if (name.endsWith('.ply')) return parsePLY(buffer);
-  // Fall back to content sniffing.
-  const head = new TextDecoder().decode(new Uint8Array(buffer.slice(0, 16))).trim().toLowerCase();
-  if (head.startsWith('ply')) return parsePLY(buffer);
-  if (head.startsWith('solid')) {
-    try { return parseSTL(buffer); } catch (e) { /* fall through */ }
-  }
-  if (head.startsWith('v ') || head.startsWith('#')) return parseOBJ(new TextDecoder().decode(buffer));
-  return parseSTL(buffer);
+  const buffer = await readFileWithProgress(file, (f) => {
+    if (onProgress) onProgress(f * 0.15, 'Reading file');
+  });
+  // The parsers own the 0.15 - 0.9 band; welding takes the last of it.
+  const parseProgress = onProgress
+    ? (f, label) => onProgress(0.15 + f * 0.75, label)
+    : null;
+
+  const parse = async () => {
+    if (name.endsWith('.stl')) return parseSTL(buffer, parseProgress);
+    if (name.endsWith('.obj')) return parseOBJ(new TextDecoder().decode(buffer), parseProgress);
+    if (name.endsWith('.ply')) return parsePLY(buffer, parseProgress);
+    // Fall back to content sniffing.
+    const head = new TextDecoder().decode(new Uint8Array(buffer.slice(0, 16))).trim().toLowerCase();
+    if (head.startsWith('ply')) return parsePLY(buffer, parseProgress);
+    if (head.startsWith('solid')) {
+      try { return await parseSTL(buffer, parseProgress); } catch (e) { /* fall through */ }
+    }
+    if (head.startsWith('v ') || head.startsWith('#')) return parseOBJ(new TextDecoder().decode(buffer), parseProgress);
+    return parseSTL(buffer, parseProgress);
+  };
+
+  const geometry = await parse();
+  // The bar has to reach the end, even when the parse was too quick to
+  // report anything in between.
+  if (onProgress) onProgress(1, 'Loaded');
+  return geometry;
 }
 
 // ---------------------------------------------------------------------------

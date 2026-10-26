@@ -39,9 +39,19 @@ repair is going.
   modules as the page, so the results are identical to the synchronous path.
   If a worker cannot be started (opening `index.html` straight off disk, for
   example) the app quietly falls back to the synchronous implementation.
+- **GPU compute** — smoothing is a Laplacian iteration over every vertex,
+  repeated many times, which is exactly what a fragment shader is good at.
+  On a big scan it runs on the GPU as a ping-pong pass over a float texture,
+  with the same crease pinning and volume restoration as the CPU path. The
+  decimator's per-face error metric is evaluated on the GPU too, which makes
+  the whole operation 1.8x faster. Anything that fails validation is thrown
+  away and the CPU path is used instead.
 - **Progress bar** — a bar at the bottom of the viewport reports what is
   happening and how far along it is, driven by the worker's own progress
   messages.
+- **Progressive loading** — a large scan is parsed in slices with the event
+  loop released between them, so the progress bar actually paints instead of
+  the page freezing until the file is in.
 - **Drag and drop** — drop an STL, OBJ or PLY straight onto the viewport. A
   dropped file goes through exactly the same path as one chosen with the file
   picker, and anything that is not a mesh is rejected with a clear message.
@@ -52,9 +62,15 @@ repair is going.
   panel at the bottom of the drawer. Click any entry to jump straight back to
   that state, or use <kbd>Ctrl</kbd>+<kbd>Z</kbd> and
   <kbd>Ctrl</kbd>+<kbd>Y</kbd>.
+- **Preview before applying** — turn on *Preview repairs* in the Fix step and
+  every repair shows its result as a green ghost first, with Accept and
+  Reject. The scan is not touched until you accept.
+- **Auto-save** — the scan is written to IndexedDB every 30 seconds. The next
+  time the app opens, a banner offers the last session back.
 - **Error boundary** — if something goes wrong the app shows a recovery screen
   with the error and a stack trace instead of going blank, and you can reload
   or try again without losing your place.
+- **Shortcut overlay** — press <kbd>?</kbd> for every keyboard shortcut.
 
 ### Mesh Doctor
 

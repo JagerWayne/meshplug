@@ -2,6 +2,14 @@
 // 10. MESHPLUG STUDIO - MAIN APPLICATION
 // ============================================================================
 
+// Below this many vertices the GPU hand-off costs more than it saves, so the
+// worker path stays in charge of small meshes.
+const GPU_MIN_VERTICES = 20000;
+
+// Below this many triangles the decimator's error metric is cheaper to
+// compute on the CPU than it is to upload to the GPU and read back.
+const GPU_MIN_FACES = 20000;
+
 // ---------------------------------------------------------------------------
 // Shared UI atoms. These live at module scope so that dragging a slider does
 // not remount the control and steal the pointer.
@@ -115,6 +123,10 @@ function App() {
   const [showDisplay, setShowDisplay] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
+  const [previewMode, setPreviewMode] = useState(false);
+  const [preview, setPreview] = useState(null);   // { geometry, label }
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  const [restoreOffer, setRestoreOffer] = useState(null);
 
   // Parameters
   const [importScale, setImportScale] = useState(1.0);
@@ -192,6 +204,60 @@ function App() {
     setClosedLoops(null); // the closed outline has to be re-traced
   }, []);
 
+  // ---------------------------------------------------------- auto-save --
+  // The scan is written to IndexedDB every 30 seconds, and offered back the
+  // next time the app opens. The shell and the selection are derived from the
+  // scan, so they are rebuilt rather than stored.
+  const scanGeoRef = useRef(null);
+  const scanNameRef = useRef('');
+  const loadMeshRef = useRef(null);
+  useEffect(() => { scanGeoRef.current = scanGeo; }, [scanGeo]);
+  useEffect(() => { scanNameRef.current = scanName; }, [scanName]);
+
+  useEffect(() => {
+    let cancelled = false;
+    autosave.init().then((ok) => {
+      if (cancelled || !ok) return;
+      autosave.start(() => {
+        const geo = scanGeoRef.current;
+        if (!geo) return null;
+        return {
+          name: scanNameRef.current || 'Untitled scan',
+          geometry: serializeSessionGeometry(geo)
+        };
+      });
+      // Offer the last session back before the user does any work.
+      autosave.peek().then((rec) => {
+        if (cancelled || !rec) return;
+        setRestoreOffer({ snapshot: rec.snapshot, savedAt: rec.savedAt });
+      });
+    });
+    return () => {
+      cancelled = true;
+      autosave.stop();
+    };
+  }, []);
+
+  const restoreSession = useCallback(() => {
+    if (!restoreOffer) return;
+    const geo = deserializeSessionGeometry(restoreOffer.snapshot.geometry);
+    if (!geo) {
+      showToast('That saved session could not be read', 'error');
+      setRestoreOffer(null);
+      return;
+    }
+    // loadMesh is defined further down, so it is reached through a ref to
+    // avoid a temporal dead zone in the dependency list.
+    loadMeshRef.current(geo, restoreOffer.snapshot.name || 'Restored scan', 1);
+    setRestoreOffer(null);
+    showToast('Session restored');
+  }, [restoreOffer, showToast]);
+
+  const discardSession = useCallback(async () => {
+    setRestoreOffer(null);
+    await autosave.clear();
+  }, []);
+
   // ----------------------------------------------------------- viewport --
   useEffect(() => {
     const container = mountRef.current;
@@ -258,6 +324,14 @@ function App() {
     selOutline.visible = false;
     scene.add(selOutline);
 
+    // Ghost of a repair that has not been accepted yet.
+    const previewMesh = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshStandardMaterial({
+      color: 0x34d399, emissive: 0x064e3b, metalness: 0.1, roughness: 0.6,
+      side: THREE.DoubleSide, transparent: true, opacity: 0.55, depthWrite: false
+    }));
+    previewMesh.visible = false;
+    scene.add(previewMesh);
+
     // Traced section: straight chords between the clicked mesh points.
     const sectionLine = new THREE.Line(
       new THREE.BufferGeometry(),
@@ -312,8 +386,12 @@ function App() {
     threeRefs.current = {
       scene, camera, perspectiveCamera, orthoCamera, renderer, controls,
       scanMesh, selMesh, selOutline, shellMesh, holeGroup, reticle, grid, axes,
-      sectionLine, sectionDots, sectionHandle
+      sectionLine, sectionDots, sectionHandle, previewMesh
     };
+
+    // The GPU engine borrows the app's renderer, so it has to be created
+    // once the renderer exists and torn down with it.
+    gpuEngine.setRenderer(renderer);
 
     let raf = 0;
     const animate = () => {
@@ -369,6 +447,19 @@ function App() {
       }
     }
   }, [scanGeo, scanRev, wireframe, scanOpacity, showScan]);
+
+  // ------------------------------------------------- preview rendering --
+  // The ghost of a repair that is waiting to be accepted.
+  useEffect(() => {
+    const { previewMesh } = threeRefs.current;
+    if (!previewMesh) return;
+    if (preview && preview.geometry) {
+      previewMesh.geometry = preview.geometry;
+      previewMesh.visible = true;
+    } else {
+      previewMesh.visible = false;
+    }
+  }, [preview]);
 
   useEffect(() => {
     const { shellMesh } = threeRefs.current;
@@ -585,6 +676,10 @@ function App() {
     setStep(2);
     setTimeout(fitView, 60);
   }, [pushHistory, showToast]);
+
+  // The auto-save panel lives higher up in the component, so it reaches the
+  // loader through this ref rather than a dependency.
+  useEffect(() => { loadMeshRef.current = loadMesh; }, [loadMesh]);
 
   const handleFileUpload = useCallback(async (file) => {
     if (!file) return;
@@ -987,8 +1082,14 @@ function App() {
   // `fn` may return a geometry (sync) or a promise for one (worker). When a
   // worker is used the UI stays responsive and the progress bar is driven by
   // the worker's progress messages.
-  const runRepair = useCallback((label, fn, useWorker = false) => {
+  //   opts.worker  - run the job in the web worker
+  //   opts.message - the toast shown when it succeeds
+  //   opts.preview - show the result as a ghost instead of applying it
+  const runRepair = useCallback((label, fn, opts = {}) => {
     if (!scanGeo) return;
+    const useWorker = !!opts.worker;
+    // Every repair follows the preview toggle unless it says otherwise.
+    const asPreview = opts.preview !== undefined ? opts.preview : previewMode;
     setBusy(true);
     progressManager.start(label);
     if (useWorker) {
@@ -1000,14 +1101,27 @@ function App() {
         progressManager.complete();
         setBusy(false);
       };
+      const done = (geo) => {
+        if (asPreview) {
+          // Hold the result as a ghost - the user decides whether to keep it.
+          if (geo) {
+            setPreview({ geometry: geo, label });
+            showToast(`Preview ready - accept or reject "${label}"`);
+          } else {
+            showToast(`${label} produced nothing to preview`, 'error');
+          }
+          return;
+        }
+        if (geo) applyGeometry(label, geo);
+        showToast(opts.message || `${label} applied`);
+      };
       try {
         const result = fn(scanGeo.clone());
         if (result && typeof result.then === 'function') {
           result
             .then((geo) => {
               progressManager.update(0.95);
-              if (geo) applyGeometry(label, geo);
-              showToast(`${label} applied`);
+              done(geo);
             })
             .catch((err) => {
               showToast(`${label} failed: ${err.message}`, 'error');
@@ -1016,32 +1130,68 @@ function App() {
           return;
         }
         progressManager.update(0.9);
-        if (result) applyGeometry(label, result);
-        showToast(`${label} applied`);
+        done(result);
       } catch (err) {
         showToast(`${label} failed: ${err.message}`, 'error');
       }
       finish();
     }, 20);
-  }, [scanGeo, applyGeometry, showToast]);
+  }, [scanGeo, applyGeometry, showToast, previewMode]);
+
+  // Applies or throws away the repair that is currently being previewed.
+  const acceptPreview = useCallback(() => {
+    if (!preview) return;
+    applyGeometry(preview.label, preview.geometry);
+    setPreview(null);
+    showToast(`${preview.label} applied`);
+  }, [preview, applyGeometry, showToast]);
+
+  const rejectPreview = useCallback(() => {
+    if (!preview) return;
+    setPreview(null);
+    showToast(`${preview.label} rejected - the scan is unchanged`);
+  }, [preview, showToast]);
 
   const doFillHoles = useCallback(() => {
     runRepair('Fill holes', (geo) => fillHolesAsync(geo, { maxHoleArea, mode: fillMode, smoothIterations: 8 })
       .then((res) => {
         showToast(`Filled ${res.filled} hole(s), skipped ${res.skipped}`);
         return res.geometry;
-      }), true);
+      }), { worker: true });
   }, [runRepair, maxHoleArea, fillMode, showToast]);
 
+  // Smoothing is the one repair that genuinely parallelises, so a big mesh
+  // goes to the GPU and a small one keeps using the worker.
   const doSmooth = useCallback(() => {
-    runRepair('Taubin smooth', (geo) => smoothAsync(geo, {
+    const vCount = (scanGeo && scanGeo.attributes.position)
+      ? scanGeo.attributes.position.count : 0;
+    const options = {
       iterations: smoothIters, lambda: smoothLambda, mu: -smoothLambda * 1.04, featureAngle
-    }), true);
-  }, [runRepair, smoothIters, smoothLambda, featureAngle]);
+    };
+    if (vCount >= GPU_MIN_VERTICES && gpuEngine.isSupported()) {
+      runRepair('Taubin smooth', (geo) => {
+        const res = gpuEngine.smooth(geo, options);
+        return res.geometry;
+      }, { message: `Taubin smooth applied on the GPU (${vCount.toLocaleString()} vertices)` });
+      return;
+    }
+    runRepair('Taubin smooth', (geo) => smoothAsync(geo, options), { worker: true });
+  }, [runRepair, scanGeo, smoothIters, smoothLambda, featureAngle]);
 
+  // The decimator's error metric is evaluated on the GPU, the collapse loop
+  // itself stays on the CPU where the topology updates belong. The GPU
+  // metric is computed in single precision, so it can pick a different
+  // collapse order than the CPU would - the resulting mesh is the same
+  // quality, but not bit for bit identical. Small meshes keep the exact
+  // CPU path, where the difference would not be worth anything.
   const doDecimate = useCallback(() => {
-    runRepair('Decimate', (geo) => decimateAsync(geo, { targetRatio: decimateRatio, boundaryWeight: 8 }), true);
-  }, [runRepair, decimateRatio]);
+    const faceCount = (scanGeo && scanGeo.index) ? scanGeo.index.count / 3 : 0;
+    const useGpu = faceCount >= GPU_MIN_FACES;
+    const quadrics = useGpu ? gpuEngine.faceQuadrics(scanGeo) : null;
+    runRepair('Decimate', (geo) => decimateAsync(geo, {
+      targetRatio: decimateRatio, boundaryWeight: 8, precomputedQuadrics: quadrics
+    }), { worker: true, message: quadrics ? 'Decimate applied (GPU error metric)' : 'Decimate applied' });
+  }, [runRepair, scanGeo, decimateRatio]);
 
   const doCullComponents = useCallback(() => {
     runRepair('Remove debris', (geo) => removeSmallComponents(geo, minComponentTris));
@@ -1323,6 +1473,10 @@ function App() {
         else clearSelection();
       }
       else if (e.key === 'f') fitView();
+      else if (e.key === '?' || (e.key === '/' && e.shiftKey)) {
+        e.preventDefault();
+        setShowShortcuts((v) => !v);
+      }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
@@ -1387,6 +1541,11 @@ function App() {
           <Tooltip title="Inspector" tip="Show or hide the MeshPlug inspector drawer.">
             <button onClick={() => setDrawerOpen(!drawerOpen)} className={BTN}>
               <Icon name="sliders" className="w-3.5 h-3.5" /> <span className="hidden md:inline">Panel</span>
+            </button>
+          </Tooltip>
+          <Tooltip title="Shortcuts" tip="Show every keyboard shortcut. Press ? at any time.">
+            <button onClick={() => setShowShortcuts(true)} className={BTN}>
+              <Icon name="keyboard" className="w-3.5 h-3.5" /> <span className="hidden md:inline">Keys</span>
             </button>
           </Tooltip>
         </div>
@@ -1459,6 +1618,38 @@ function App() {
             : 'bg-[#03060c]/90 border-emerald-500/40 text-emerald-200'}`}>
             {toast.msg}
           </div>
+        )}
+
+        {/* Preview of a repair waiting to be accepted */}
+        {preview && (
+          <div className="absolute bottom-14 left-1/2 -translate-x-1/2 flex items-center gap-3 px-4 py-2.5 rounded-xl bg-[#0a0f1d]/95 border border-emerald-500/40 shadow-2xl backdrop-blur-md z-20">
+            <Icon name="eye" className="w-4 h-4 text-emerald-400 shrink-0" />
+            <div className="text-[11px] text-slate-300">
+              Preview of <strong className="text-emerald-200">{preview.label}</strong> - the scan is unchanged.
+            </div>
+            <button
+              onClick={acceptPreview}
+              className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-bold"
+            >
+              Accept
+            </button>
+            <button
+              onClick={rejectPreview}
+              className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-bold"
+            >
+              Reject
+            </button>
+          </div>
+        )}
+
+        {/* Offer to restore the last session */}
+        {restoreOffer && (
+          <RestoreBanner
+            snapshot={restoreOffer.snapshot}
+            savedAt={restoreOffer.savedAt}
+            onRestore={restoreSession}
+            onDismiss={discardSession}
+          />
         )}
 
         {/* ==================================================== DRAWER ==== */}
@@ -1554,6 +1745,20 @@ function App() {
                     : `This scan has ${analysis ? analysis.boundaryEdges : 0} open edge(s) in ${analysis ? analysis.loopCount : 0} hole(s). Fill them first.`}
                 </Hint>
                 <div className="p-3 space-y-3">
+                <label className="flex items-start gap-2.5 p-2.5 rounded-xl bg-slate-900 border border-slate-800 cursor-pointer hover:border-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={previewMode}
+                    onChange={(e) => setPreviewMode(e.target.checked)}
+                    className="w-4 h-4 mt-0.5 accent-emerald-500 shrink-0"
+                  />
+                  <span className="flex-1">
+                    <span className="block text-[11px] font-bold text-slate-200">Preview repairs</span>
+                    <span className="block text-[10px] text-slate-500 leading-relaxed mt-0.5">
+                      Show the result as a green ghost first. Nothing changes until you accept it.
+                    </span>
+                  </span>
+                </label>
                 {analysis && (
                   <div className="p-2.5 rounded-xl bg-slate-900 border border-slate-800 space-y-1">
                     <Stat label="Holes / open edges" value={analysis.boundaryEdges} tone={analysis.boundaryEdges ? 'text-rose-400' : 'text-emerald-400'} />
@@ -2055,10 +2260,13 @@ function App() {
           {hoverInfo && <span className="text-cyan-300">Face <strong>#{hoverInfo.face}</strong></span>}
         </div>
         <div className="flex items-center gap-4">
-          <span className="hidden md:inline">P pick &middot; S section &middot; A area &middot; G grow &middot; B brush &middot; E erase &middot; Space spline &middot; Enter close &middot; F fit</span>
+          <span className="hidden md:inline">P pick &middot; S section &middot; A area &middot; G grow &middot; B brush &middot; E erase &middot; Space spline &middot; Enter close &middot; F fit &middot; ? shortcuts</span>
           <span className="font-mono text-slate-500">units: mm</span>
         </div>
       </footer>
+
+      {/* Keyboard shortcut reference */}
+      {showShortcuts && <ShortcutsOverlay onClose={() => setShowShortcuts(false)} />}
     </div>
   );
 }
