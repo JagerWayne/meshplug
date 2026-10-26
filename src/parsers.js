@@ -2,6 +2,47 @@
 // 4. MESH PARSERS & EXPORTERS  (STL / OBJ / PLY  ->  STL / OBJ / STEP)
 // ============================================================================
 
+// Reads a glTF / GLB file via the GLTFLoader. The scene's meshes are merged
+// into a single geometry, with their world matrices applied.
+function parseGLTF(buffer, onProgress) {
+  return new Promise((resolve, reject) => {
+    if (!THREE.GLTFLoader) {
+      reject(new Error('GLTFLoader is not available'));
+      return;
+    }
+    if (onProgress) onProgress(0.2, 'Parsing glTF');
+    const loader = new THREE.GLTFLoader();
+    loader.parse(buffer, '', (gltf) => {
+      try {
+        if (onProgress) onProgress(0.8, 'Building mesh');
+        resolve(gltfToGeometry(gltf));
+        if (onProgress) onProgress(1, 'Loaded');
+      } catch (e) {
+        reject(e);
+      }
+    }, (err) => reject(new Error((err && err.message) || 'glTF parse failed')));
+  });
+}
+
+// Flattens a glTF scene graph into one BufferGeometry.
+function gltfToGeometry(gltf) {
+  gltf.scene.updateMatrixWorld(true);
+  const geometries = [];
+  gltf.scene.traverse((node) => {
+    if (node.isMesh && node.geometry) {
+      const g = node.geometry.clone();
+      if (g.attributes.position) g.applyMatrix4(node.matrixWorld);
+      if (g.index || g.attributes.position) geometries.push(g);
+    }
+  });
+  if (!geometries.length) throw new Error('No meshes in the file');
+  const merged = geometries.reduce((acc, g) => mergeGeometries(acc, g));
+  const welded = weldVertices(merged);
+  welded.computeBoundingBox();
+  welded.computeBoundingSphere();
+  return welded;
+}
+
 // Reads a File into an ArrayBuffer, reporting the download progress.
 function readFileWithProgress(file, onProgress) {
   return new Promise((resolve, reject) => {
@@ -259,9 +300,11 @@ async function parseMeshFile(file, onProgress) {
     if (name.endsWith('.stl')) return parseSTL(buffer, parseProgress);
     if (name.endsWith('.obj')) return parseOBJ(new TextDecoder().decode(buffer), parseProgress);
     if (name.endsWith('.ply')) return parsePLY(buffer, parseProgress);
+    if (name.endsWith('.glb') || name.endsWith('.gltf')) return parseGLTF(buffer, parseProgress);
     // Fall back to content sniffing.
     const head = new TextDecoder().decode(new Uint8Array(buffer.slice(0, 16))).trim().toLowerCase();
     if (head.startsWith('ply')) return parsePLY(buffer, parseProgress);
+    if (head.startsWith('gltf')) return parseGLTF(buffer, parseProgress);
     if (head.startsWith('solid')) {
       try { return await parseSTL(buffer, parseProgress); } catch (e) { /* fall through */ }
     }

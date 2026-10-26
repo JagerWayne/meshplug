@@ -16,7 +16,9 @@ const SHORTCUT_GROUPS = [
       { keys: ['A'], desc: 'Area - drag a rectangle over the part' },
       { keys: ['G'], desc: 'Grow - flood a whole smooth region' },
       { keys: ['B'], desc: 'Brush - paint the area in by hand' },
-      { keys: ['E'], desc: 'Erase - take faces back out' }
+      { keys: ['E'], desc: 'Erase - take faces back out' },
+      { keys: ['L'], desc: 'Lasso - draw a freehand loop around the part' },
+      { keys: ['M'], desc: 'Measure - distance and angle on the mesh' }
     ]
   },
   {

@@ -99,6 +99,21 @@ export default suite('selection', [
     }
   },
   {
+    name: 'pointInPolygon answers inside and outside correctly',
+    fn: (M) => {
+      const square = [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }, { x: 0, y: 10 }];
+      assert(M.pointInPolygon(5, 5, square), 'the middle is inside');
+      assert(M.pointInPolygon(1, 1, square), 'near the corner is inside');
+      assert(!M.pointInPolygon(20, 5, square), 'outside to the right');
+      assert(!M.pointInPolygon(-5, 5, square), 'outside to the left');
+      assert(!M.pointInPolygon(5, 20, square), 'outside above');
+      // A concave (U) shape: the notch is outside.
+      const u = [{ x: 0, y: 0 }, { x: 10, y: 0 }, { x: 10, y: 10 }, { x: 6, y: 10 }, { x: 6, y: 3 }, { x: 4, y: 3 }, { x: 4, y: 10 }, { x: 0, y: 10 }];
+      assert(!M.pointInPolygon(5, 8, u), 'the notch of a U is outside');
+      assert(M.pointInPolygon(8, 8, u), 'the arm of a U is inside');
+    }
+  },
+  {
     name: 'autoSeedForSection finds a face inside the outline',
     fn: (M) => {
       const THREE = M.THREE;

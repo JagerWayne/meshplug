@@ -26,6 +26,7 @@ const ICON_PATHS = {
   target: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />,
   ruler: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 6l3 3m0 0l3-3m-3 3v12m12-15l3 3m0 0l-3 3m3-3H9" />,
   keyboard: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M8 12h.01M12 12h.01M16 12h.01M7 16h10a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />,
+  lasso: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 20c8-1 12-6 12-11 0-3-2-5-4-4-2 1-2 4 0 6 1 1 3 1 4 0 1-1 1-3-1-5" />,
   grid: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z" />,
   plus: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />,
   info: <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />,

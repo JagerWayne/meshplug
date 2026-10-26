@@ -33,12 +33,18 @@ function makeTicker(onProgress, total, label) {
 
 // Merges vertices that sit within `tolerance` of each other and rebuilds the
 // index buffer. Scan exports almost always carry split vertices.
+//
+// Handles both kinds of input:
+//   * non-indexed  - every position is a triangle corner, so the weld list
+//                    becomes the new index
+//   * indexed      - the existing index is remapped through the weld, so the
+//                    triangle connectivity is preserved
 function weldVertices(geometry, tolerance = 1e-4) {
   if (!geometry) return geometry;
   const pos = geometry.attributes.position;
   if (!pos) return geometry;
   const vertices = [];
-  const indices = [];
+  const remap = new Int32Array(pos.count);
   const hashToIndex = new Map();
   const factor = 1 / tolerance;
 
@@ -51,11 +57,21 @@ function weldVertices(geometry, tolerance = 1e-4) {
       vertices.push(x, y, z);
       hashToIndex.set(key, idx);
     }
-    indices.push(idx);
+    remap[i] = idx;
   }
   const welded = new THREE.BufferGeometry();
   welded.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
-  welded.setIndex(indices);
+  if (geometry.index) {
+    // Indexed: remap the existing connectivity through the weld.
+    const src = geometry.index.array;
+    const out = new Array(src.length);
+    for (let i = 0; i < src.length; i++) out[i] = remap[src[i]];
+    welded.setIndex(out);
+  } else {
+    // Non-indexed: each position is a triangle corner, so the weld list is
+    // the new index.
+    welded.setIndex(Array.from(remap));
+  }
   welded.computeVertexNormals();
   welded.computeBoundingBox();
   welded.computeBoundingSphere();
@@ -92,7 +108,7 @@ async function weldVerticesAsync(geometry, onProgress) {
   const pos = geometry.attributes.position;
   if (!pos) return geometry;
   const vertices = [];
-  const indices = [];
+  const remap = new Int32Array(pos.count);
   const hashToIndex = new Map();
   const factor = 1 / 1e-4;
   const tick = makeTicker(onProgress, pos.count, 'Welding vertices');
@@ -106,12 +122,19 @@ async function weldVerticesAsync(geometry, onProgress) {
       vertices.push(x, y, z);
       hashToIndex.set(key, idx);
     }
-    indices.push(idx);
+    remap[i] = idx;
     if ((i & 8191) === 0) await tick(i);
   }
   const welded = new THREE.BufferGeometry();
   welded.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
-  welded.setIndex(indices);
+  if (geometry.index) {
+    const src = geometry.index.array;
+    const out = new Array(src.length);
+    for (let i = 0; i < src.length; i++) out[i] = remap[src[i]];
+    welded.setIndex(out);
+  } else {
+    welded.setIndex(Array.from(remap));
+  }
   welded.computeVertexNormals();
   welded.computeBoundingBox();
   welded.computeBoundingSphere();

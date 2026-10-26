@@ -70,7 +70,9 @@ const SELECTION_TOOLS = [
   { id: 'box', icon: 'grid', label: 'Area', help: 'Drag a rectangle over it' },
   { id: 'grow', icon: 'sparkles', label: 'Grow', help: 'Flood a whole smooth region' },
   { id: 'paint', icon: 'pen', label: 'Brush', help: 'Paint it in by hand' },
-  { id: 'erase', icon: 'x', label: 'Erase', help: 'Take faces back out' }
+  { id: 'erase', icon: 'x', label: 'Erase', help: 'Take faces back out' },
+  { id: 'lasso', icon: 'lasso', label: 'Lasso', help: 'Draw a freehand loop around it' },
+  { id: 'measure', icon: 'ruler', label: 'Measure', help: 'Click points for distance and angle' }
 ];
 
 const TOOL_HELP = {
@@ -79,7 +81,9 @@ const TOOL_HELP = {
   box: 'Drag a rectangle over the part you want the plastic to cover.',
   grow: 'Click once and the selection floods across the whole smooth region, stopping at hard creases.',
   paint: 'Paint the area in with the brush. Drag to sweep across the surface.',
-  erase: 'Click faces to take them back out of the selection.'
+  erase: 'Click faces to take them back out of the selection.',
+  lasso: 'Hold and drag to draw a freehand loop around the part; the faces inside are selected.',
+  measure: 'Click points on the mesh: one places a marker, two show a distance, three show an angle. A fourth click starts over.'
 };
 
 // A one line instruction bar at the top of every step. It stays pinned so the
@@ -106,6 +110,8 @@ function App() {
   const selMaskRef = useRef(null);
   const boxStartRef = useRef(null);
   const boxAdditiveRef = useRef(false);
+  const lassoRef = useRef(null);          // { pts: [{x,y}], additive } while drawing
+  const [lassoPts, setLassoPts] = useState(null);   // the freehand path for rendering
   const [historyTick, setHistoryTick] = useState(0);
 
   // --------------------------------------------------------------- state --
@@ -129,6 +135,7 @@ function App() {
   const [sectionSeed, setSectionSeed] = useState(null);   // face the region was grown from
   const [sectionSel, setSectionSel] = useState(null);     // index of the edited point
   const [sectionMode, setSectionMode] = useState('line');  // line | spline
+  const [measurePts, setMeasurePts] = useState([]);         // { point: Vector3 }
   const [smoothStrength, setSmoothStrength] = useState(2);
   const [rimSmooth, setRimSmooth] = useState(true);
   const [rimSmoothPasses, setRimSmoothPasses] = useState(2);
@@ -170,6 +177,7 @@ function App() {
   const [showScan, setShowScan] = useState(true);
   const [showSelection, setShowSelection] = useState(true);
   const [showHoles, setShowHoles] = useState(true);
+  const [showOriginal, setShowOriginal] = useState(false);
   const [projection, setProjection] = useState('persp');
   const [hoverInfo, setHoverInfo] = useState(null);
 
@@ -179,6 +187,22 @@ function App() {
     () => (scanGeo && selMask ? selectionStats(scanGeo, selMask) : { faces: 0, percent: 0, area: 0, size: { x: 0, y: 0, z: 0 } }),
     [scanGeo, selMask, selRev]
   );
+
+  // The live measurement: a distance with two points, an angle with three.
+  const measureReadout = useMemo(() => {
+    if (measurePts.length < 2) return null;
+    const a = measurePts[0].point, b = measurePts[1].point;
+    const dist = a.distanceTo(b);
+    if (measurePts.length < 3) return `${dist.toFixed(2)} mm`;
+    const c = measurePts[2].point;
+    const ba = new THREE.Vector3().subVectors(a, b);
+    const bc = new THREE.Vector3().subVectors(c, b);
+    const cos = ba.dot(bc) / Math.max(1e-9, ba.length() * bc.length());
+    const angle = Math.acos(Math.min(1, Math.max(-1, cos))) * 180 / Math.PI;
+    const d1 = a.distanceTo(b), d2 = b.distanceTo(c);
+    return `${angle.toFixed(1)}°  ·  ${d1.toFixed(2)} + ${d2.toFixed(2)} mm`;
+  }, [measurePts]);
+
 
   // Which workflow steps are finished - drives the ticks in the stepper.
   const stepDone = useCallback((id) => {
@@ -321,6 +345,15 @@ function App() {
     }));
     scene.add(scanMesh);
 
+    // The original scan, drawn as a magenta wireframe ghost so the repaired
+    // mesh can be compared against where it started.
+    const originalMesh = new THREE.Mesh(
+      new THREE.BufferGeometry(),
+      new THREE.MeshBasicMaterial({ color: 0xf472b6, wireframe: true, transparent: true, opacity: 0.35, depthWrite: false })
+    );
+    originalMesh.visible = false;
+    scene.add(originalMesh);
+
     const selMesh = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({
       color: 0x22d3ee, transparent: true, opacity: 0.45, side: THREE.DoubleSide,
       depthTest: false, depthWrite: false
@@ -344,6 +377,11 @@ function App() {
     }));
     previewMesh.visible = false;
     scene.add(previewMesh);
+
+    // Measurement points and the line joining them.
+    const measureGroup = new THREE.Group();
+    measureGroup.visible = false;
+    scene.add(measureGroup);
 
     // Traced section: straight chords between the clicked mesh points.
     const sectionLine = new THREE.Line(
@@ -398,8 +436,8 @@ function App() {
 
     threeRefs.current = {
       scene, camera, perspectiveCamera, orthoCamera, renderer, controls,
-      scanMesh, selMesh, selOutline, shellMesh, holeGroup, reticle, grid, axes,
-      sectionLine, sectionDots, sectionHandle, previewMesh
+      scanMesh, originalMesh, selMesh, selOutline, shellMesh, holeGroup, reticle, grid, axes,
+      sectionLine, sectionDots, sectionHandle, previewMesh, measureGroup
     };
 
     // The GPU engine borrows the app's renderer, so it has to be created
@@ -473,6 +511,56 @@ function App() {
       previewMesh.visible = false;
     }
   }, [preview]);
+
+  // -------------------------------------------------- original overlay --
+  // The first history entry is the scan as it was loaded, so it is drawn as
+  // a ghost whenever the user wants to compare against where they started.
+  useEffect(() => {
+    const { originalMesh } = threeRefs.current;
+    if (!originalMesh) return;
+    const first = historyRef.current.list[0];
+    if (showOriginal && first && first.geometry && first.geometry !== scanGeo) {
+      originalMesh.geometry = first.geometry;
+      originalMesh.visible = true;
+    } else {
+      originalMesh.visible = false;
+    }
+  }, [showOriginal, scanGeo, historyTick]);
+
+  // ------------------------------------------------- measurement overlay --
+  // Draws the measurement points and the line between them. The points are
+  // small spheres so they are visible from any angle.
+  useEffect(() => {
+    const { measureGroup } = threeRefs.current;
+    if (!measureGroup) return;
+    // Clear the group and rebuild it from the current points.
+    while (measureGroup.children.length) measureGroup.remove(measureGroup.children[0]);
+
+    if (!measurePts.length) {
+      measureGroup.visible = false;
+      return;
+    }
+    measureGroup.visible = true;
+
+    const dot = new THREE.SphereGeometry(1.4, 16, 12);
+    const dotMat = new THREE.MeshBasicMaterial({ color: 0xfbbf24, depthTest: false });
+    const lineMat = new THREE.LineBasicMaterial({ color: 0xfbbf24, depthTest: false, transparent: true, opacity: 0.9 });
+
+    measurePts.forEach((p) => {
+      const sphere = new THREE.Mesh(dot, dotMat);
+      sphere.position.copy(p.point);
+      measureGroup.add(sphere);
+    });
+
+    if (measurePts.length >= 2) {
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(
+        measurePts.map((p) => p.point.toArray()).flat(), 3));
+      const line = new THREE.Line(geo, lineMat);
+      line.renderOrder = 960;
+      measureGroup.add(line);
+    }
+  }, [measurePts]);
 
   useEffect(() => {
     const { shellMesh } = threeRefs.current;
@@ -620,7 +708,7 @@ function App() {
     };
     h.list = h.list.slice(0, h.idx + 1);
     h.list.push(snapshot);
-    if (h.list.length > 40) h.list.shift();
+    if (h.list.length > 500) h.list.shift();
     h.idx = h.list.length - 1;
     setHistoryTick((t) => t + 1);
   }, []);
@@ -877,6 +965,18 @@ function App() {
       return;
     }
 
+    // Lasso drag: append the pointer to the freehand path.
+    if (lassoRef.current && container) {
+      const cr = container.getBoundingClientRect();
+      const pt = { x: e.clientX - cr.left, y: e.clientY - cr.top };
+      const last = lassoRef.current.pts[lassoRef.current.pts.length - 1];
+      if (!last || Math.hypot(pt.x - last.x, pt.y - last.y) > 3) {
+        lassoRef.current.pts.push(pt);
+        setLassoPts(lassoRef.current.pts.slice());
+      }
+      return;
+    }
+
     if (face === hoverFaceRef.current) return;
     hoverFaceRef.current = face;
     if (reticle) {
@@ -903,7 +1003,26 @@ function App() {
         showToast(picked ? `Area selected - ${picked.toLocaleString()} faces` : 'No faces inside the box');
       }
     }
-  }, [boxRect, selectInRect, showToast]);
+    if (lassoRef.current) {
+      const lasso = lassoRef.current;
+      lassoRef.current = null;
+      setLassoPts(null);
+      if (lasso.pts.length >= 3) {
+        const { camera, renderer } = threeRefs.current;
+        const rect = renderer.domElement.getBoundingClientRect();
+        const triCount = scanGeo.index ? scanGeo.index.count / 3 : scanGeo.attributes.position.count / 3;
+        const current = selMaskRef.current && selMaskRef.current.length === triCount
+          ? selMaskRef.current : new Uint8Array(triCount);
+        const mask = selectInScreenPolygon(scanGeo, camera, rect, lasso.pts, lasso.additive, current);
+        let picked = 0;
+        for (let t = 0; t < mask.length; t++) if (mask[t]) picked++;
+        setSelection(mask);
+        showToast(picked ? `Lasso selected - ${picked.toLocaleString()} faces` : 'Nothing inside the lasso');
+      } else {
+        showToast('Draw a bigger loop - at least three points', 'error');
+      }
+    }
+  }, [boxRect, selectInRect, showToast, scanGeo, setSelection]);
 
   // Drag and drop handlers for file loading
   const handleDragOver = useCallback((e) => {
@@ -929,8 +1048,8 @@ function App() {
     const file = files[0];
     const ext = file.name.split('.').pop().toLowerCase();
 
-    if (!['stl', 'obj', 'ply'].includes(ext)) {
-      showToast('Unsupported file format. Please use STL, OBJ, or PLY.', 'error');
+    if (!['stl', 'obj', 'ply', 'glb', 'gltf'].includes(ext)) {
+      showToast('Unsupported file format. Please use STL, OBJ, PLY, GLB or glTF.', 'error');
       return;
     }
 
@@ -1021,6 +1140,17 @@ function App() {
       return;
     }
 
+    if (tool === 'lasso') {
+      if (!container) return;
+      const cr = container.getBoundingClientRect();
+      lassoRef.current = {
+        pts: [{ x: e.clientX - cr.left, y: e.clientY - cr.top }],
+        additive: !!(e.shiftKey || e.ctrlKey)
+      };
+      setLassoPts(lassoRef.current.pts.slice());
+      return;
+    }
+
     const hit = pickAt(e.clientX, e.clientY);
     if (!hit || hit.faceIndex < 0) return;
     const additive = e.shiftKey || e.ctrlKey;
@@ -1088,6 +1218,13 @@ function App() {
     } else if (tool === 'erase') {
       const mask = eraseSphere(scanGeo, current, hit.point, pickRadius);
       setSelection(mask);
+    } else if (tool === 'measure') {
+      // Click points on the mesh: one gives a position, two a distance, three
+      // an angle. A fourth click starts a fresh measurement.
+      setMeasurePts((prev) => {
+        if (prev.length >= 3) return [{ point: hit.point.clone() }];
+        return [...prev, { point: hit.point.clone() }];
+      });
     }
   }, [scanGeo, tool, growAngle, brushRadius, pickRadius, pickAt, showToast, setSelection, sectionPts, sectionClosed, sectionSel, projectSectionPoints, moveSectionPoint]);
 
@@ -1469,6 +1606,8 @@ function App() {
       else if (e.key.toLowerCase() === 'a') setTool('box');
       else if (e.key.toLowerCase() === 'b') setTool('paint');
       else if (e.key.toLowerCase() === 'e') setTool('erase');
+      else if (e.key.toLowerCase() === 'l') setTool('lasso');
+      else if (e.key.toLowerCase() === 'm') setTool('measure');
       else if (e.key === 'Enter') { if (sectionPts.length >= 3 && !sectionClosed) doCloseSection(); }
       else if (e.code === 'Space') {
         e.preventDefault();
@@ -1621,6 +1760,19 @@ function App() {
           />
         )}
 
+        {/* Lasso path */}
+        {lassoPts && lassoPts.length > 1 && (
+          <svg className="absolute inset-0 pointer-events-none z-10 w-full h-full">
+            <polyline
+              points={lassoPts.map((p) => `${p.x},${p.y}`).join(' ')}
+              fill="none"
+              stroke="#f472b6"
+              strokeWidth="1.5"
+              strokeDasharray="4 2"
+            />
+          </svg>
+        )}
+
         {/* Floating HUD */}
         <div className="absolute top-3 left-3 pointer-events-none space-y-1.5">
           <div className="cad-glass rounded-xl border border-slate-700/70 px-3 py-2 space-y-0.5">
@@ -1637,6 +1789,11 @@ function App() {
               <div className="text-[10px] font-mono text-cyan-300 font-bold">
                 {selStats.faces.toLocaleString()} faces selected ({selStats.percent.toFixed(1)}%)
               </div>
+            </div>
+          )}
+          {measureReadout && (
+            <div className="cad-glass rounded-xl border border-amber-500/40 px-3 py-2">
+              <div className="text-[10px] font-mono text-amber-300 font-bold">{measureReadout}</div>
             </div>
           )}
         </div>
@@ -1748,35 +1905,36 @@ function App() {
                         Nothing to undo yet. Every repair you apply is recorded here.
                       </div>
                     ) : (
-                      <ol className="relative space-y-0.5">
-                        {historyList.map((entry, i) => (
-                          <li key={i}>
-                            <button
-                              onClick={() => jumpToHistory(i)}
-                              title={entry.label}
-                              className={`w-full flex items-center gap-2 px-2 py-1 rounded-lg text-left transition ${
-                                entry.state === 'current'
-                                  ? 'bg-cyan-500/20 border border-cyan-400/40'
-                                  : 'hover:bg-slate-800/60 border border-transparent'
-                              }`}
-                            >
-                              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                                entry.state === 'current' ? 'bg-cyan-400'
-                                  : entry.state === 'future' ? 'bg-slate-700'
-                                    : 'bg-emerald-500/70'
-                              }`} />
-                              <span className={`text-[10px] flex-1 truncate ${
-                                entry.state === 'current' ? 'text-cyan-200 font-bold'
-                                  : entry.state === 'future' ? 'text-slate-600'
-                                    : 'text-slate-400'
-                              }`}>
-                                {entry.label}
-                              </span>
-                              {entry.state === 'current' && <Icon name="check" className="w-3 h-3 text-cyan-400 shrink-0" />}
-                            </button>
-                          </li>
-                        ))}
-                      </ol>
+                      <VirtualList
+                        items={historyList}
+                        rowHeight={26}
+                        height={Math.min(historyList.length * 26, 220)}
+                        renderItem={(entry, i) => (
+                          <button
+                            onClick={() => jumpToHistory(i)}
+                            title={entry.label}
+                            className={`w-full flex items-center gap-2 px-2 py-1 rounded-lg text-left transition h-full ${
+                              entry.state === 'current'
+                                ? 'bg-cyan-500/20 border border-cyan-400/40'
+                                : 'hover:bg-slate-800/60 border border-transparent'
+                            }`}
+                          >
+                            <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                              entry.state === 'current' ? 'bg-cyan-400'
+                                : entry.state === 'future' ? 'bg-slate-700'
+                                  : 'bg-emerald-500/70'
+                            }`} />
+                            <span className={`text-[10px] flex-1 truncate ${
+                              entry.state === 'current' ? 'text-cyan-200 font-bold'
+                                : entry.state === 'future' ? 'text-slate-600'
+                                  : 'text-slate-400'
+                            }`}>
+                              {entry.label}
+                            </span>
+                            {entry.state === 'current' && <Icon name="check" className="w-3 h-3 text-cyan-400 shrink-0" />}
+                          </button>
+                        )}
+                      />
                     )}
                     <div className="mt-2 text-[9px] text-slate-500 leading-relaxed">
                       Click any step to jump back to it. <kbd className="font-mono text-slate-400">Ctrl+Z</kbd> undoes,
@@ -1817,6 +1975,10 @@ function App() {
                     <label className="flex items-center justify-between text-[10px] text-slate-300">
                       Scan wireframe
                       <input type="checkbox" checked={wireframe} onChange={(e) => setWireframe(e.target.checked)} className="w-4 h-4 accent-cyan-500" />
+                    </label>
+                    <label className="flex items-center justify-between text-[10px] text-slate-300">
+                      Compare with original
+                      <input type="checkbox" checked={showOriginal} onChange={(e) => setShowOriginal(e.target.checked)} className="w-4 h-4 accent-fuchsia-500" />
                     </label>
                     <Field label="Scan opacity" value={scanOpacity} onChange={setScanOpacity} step={0.05} min={0.1} max={1} />
                     <Field label="Shell opacity" value={shellOpacity} onChange={setShellOpacity} step={0.05} min={0.1} max={1} />

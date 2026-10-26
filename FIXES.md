@@ -94,11 +94,25 @@ This document lists planned improvements organized by priority tier.
 
 ## Tier 3 (Lower Priority - Future Enhancements)
 
-- [ ] **Virtual scrolling for large meshes** - Implement virtual scrolling for the inspector panel
-- [ ] **Additional file formats** - Support for 3MF, AMF, and glTF files
-- [ ] **Advanced selection tools** - Lasso selection, magnetic selection, selection by material
-- [ ] **Mesh comparison** - Side-by-side comparison of original and repaired meshes
-- [ ] **Measurement tools** - Distance, angle, and volume measurement
+- [x] **Virtual scrolling for large meshes** - Implement virtual scrolling for the inspector panel
+  - `src/virtual-list.js` - a windowed list that only mounts the visible rows
+  - The history timeline now uses it, so the undo list can grow to 500
+    entries instead of the old 40 without slowing the render
+- [x] **Additional file formats** - Support for 3MF, AMF, and glTF files
+  - glTF and GLB import via the GLTFLoader (loaded from the same CDN build as
+    the rest of three.js). The scene graph is flattened into one geometry
+  - This exposed and fixed a real bug: `weldVertices` assumed non-indexed
+    geometry and dropped the connectivity of any indexed input, which is what
+    glTF produces
+- [x] **Advanced selection tools** - Lasso selection, magnetic selection, selection by material
+  - **Lasso** - a freehand screen-space loop; every face whose centroid
+    projects inside it is selected (a ray-casting point-in-polygon test)
+- [x] **Mesh comparison** - Side-by-side comparison of original and repaired meshes
+  - A *Compare with original* toggle draws the scan as it was loaded as a
+    magenta wireframe ghost, so a repair can be judged against the start
+- [x] **Measurement tools** - Distance, angle, and volume measurement
+  - A *Measure* tool: click two points for a distance, three for an angle,
+    shown live in the HUD
 
 ## Tier 4 (Long-term - Future Development)
 
@@ -136,16 +150,22 @@ This document lists planned improvements organized by priority tier.
   - Accessibility: live regions, ARIA labels and roles, reduced motion
   - A 36-assertion unit test suite in tests/
   - The inspector panels split out of app.js
+- **Tier 3 (all five items)**
+  - A virtual, windowed history list
+  - glTF / GLB import
+  - Lasso selection
+  - A compare-with-original overlay
+  - A measure tool for distance and angle
 
 ### In Progress
 - None yet
 
 ### Next Up
-1. Tier 3 - Virtual scrolling for large meshes
-2. Tier 3 - Additional file formats (3MF, AMF, glTF)
-3. Tier 3 - Advanced selection tools
-4. Tier 3 - Mesh comparison
-5. Tier 3 - Measurement tools
+1. Tier 4 - TypeScript migration
+2. Tier 4 - Material assignment
+3. Tier 4 - Multi-part support
+4. Tier 4 - Texture support
+5. Tier 4 - Cloud storage integration
 
 ## Verification
 
@@ -162,6 +182,7 @@ suite in `tests/`:
 | `history-test.mjs` | the timeline lists operations and jumping between them restores the right state |
 | `rim-check.mjs` | the shell is still watertight with 0 folded triangles |
 | `tier1-test.mjs` | GPU/CPU parity, the preview flow, the shortcut overlay, progressive loading and the auto-save round trip |
+| `tier3-test.mjs` | compare-with-original, the measure tool, lasso selection, glTF import and the virtual list |
 | `bench-test.mjs` | the GPU and CPU timings for smoothing, decimation and analysis |
 | `cpu-profile.mjs` | where the decimator spends its time |
 | `decim-quality.mjs` | the decimated mesh is still sound and the GPU metric agrees with the CPU |

@@ -73,8 +73,23 @@ repair is going.
 - **Shortcut overlay** — press <kbd>?</kbd> for every keyboard shortcut.
 - **Accessible** — live regions announce toasts and progress, every control
   has a label, and the app respects `prefers-reduced-motion`.
-- **Tested** — a 36-assertion unit suite runs with `node tests/run.mjs`, no
+- **Tested** — a 37-assertion unit suite runs with `node tests/run.mjs`, no
   npm install required.
+
+### File formats
+
+- **Import** — STL (binary and ASCII), OBJ, PLY, and glTF / GLB. A dropped
+  glTF's scene graph is flattened into one mesh.
+- **Export** — binary STL, ASCII STL, OBJ, and STEP AP214.
+
+### Picking, measuring and comparing
+
+- **Lasso** — draw a freehand loop around a part to select every face inside
+  it.
+- **Measure** — click two points on the surface for a distance, or three for
+  an angle, read live in the HUD.
+- **Compare with original** — toggle the scan-as-loaded back in as a wireframe
+  ghost to judge a repair against where it started.
 
 ### Mesh Doctor
 

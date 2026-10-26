@@ -38,7 +38,7 @@ const ScanPanel = ({ p }) => {
         <input
           ref={fileInputRef}
           type="file"
-          accept=".stl,.obj,.ply"
+          accept=".stl,.obj,.ply,.glb,.gltf"
           className="hidden"
           onChange={(e) => { handleFileUpload(e.target.files[0]); e.target.value = ''; }}
         />

@@ -718,3 +718,64 @@ function selectionStats(geometry, mask) {
     size: { x: size.x, y: size.y, z: size.z }
   };
 }
+
+// ---------------------------------------------------------------------------
+// LASSO SELECTION
+// ---------------------------------------------------------------------------
+// Selects the faces whose centroid projects inside a freehand screen-space
+// polygon. The polygon is in canvas-local pixels, and the camera is used to
+// project each face centroid to the same space, so the lasso follows what
+// the user sees.
+function selectInScreenPolygon(geometry, camera, rect, polygon, additive, currentMask) {
+  if (!geometry || !geometry.index || polygon.length < 3) return currentMask;
+  const triCount = geometry.index.count / 3;
+  const pos = geometry.attributes.position;
+  const idx = geometry.index;
+  const next = additive && currentMask ? Uint8Array.from(currentMask) : new Uint8Array(triCount);
+
+  // Screen-space bounding box of the polygon: faces whose centroid is far
+  // outside it are skipped without a full point-in-polygon test.
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const pt of polygon) {
+    if (pt.x < minX) minX = pt.x;
+    if (pt.x > maxX) maxX = pt.x;
+    if (pt.y < minY) minY = pt.y;
+    if (pt.y > maxY) maxY = pt.y;
+  }
+
+  const v = new THREE.Vector3();
+  const c = new THREE.Vector3();
+  let count = 0;
+
+  for (let t = 0; t < triCount; t++) {
+    const a = idx.getX(t * 3), b = idx.getX(t * 3 + 1), c2 = idx.getX(t * 3 + 2);
+    c.set(
+      (pos.getX(a) + pos.getX(b) + pos.getX(c2)) / 3,
+      (pos.getY(a) + pos.getY(b) + pos.getY(c2)) / 3,
+      (pos.getZ(a) + pos.getZ(b) + pos.getZ(c2)) / 3
+    );
+    // Project the centroid to screen space.
+    v.copy(c).project(camera);
+    const sx = (v.x * 0.5 + 0.5) * rect.width;
+    const sy = (-v.y * 0.5 + 0.5) * rect.height;
+    if (sx < minX || sx > maxX || sy < minY || sy > maxY) continue;
+    if (pointInPolygon(sx, sy, polygon)) {
+      next[t] = 1;
+      count++;
+    }
+  }
+  return next;
+}
+
+// Standard ray-casting point-in-polygon test.
+function pointInPolygon(x, y, polygon) {
+  let inside = false;
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const xi = polygon[i].x, yi = polygon[i].y;
+    const xj = polygon[j].x, yj = polygon[j].y;
+    if ((yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
