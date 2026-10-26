@@ -29,6 +29,33 @@ and the footer both mirror it, and *Back* / *Next* walk the path. Display
 options (wireframe, opacity, hole markers) are tucked into a collapsible at
 the bottom so they never get in the way.
 
+### Performance
+
+The heavy work runs off the main thread, so the app never freezes while a
+repair is going.
+
+- **Web workers** — hole filling, Taubin smoothing, decimation and the shell
+  build all run in `src/mesh-worker.js`. The worker shares the same mesh
+  modules as the page, so the results are identical to the synchronous path.
+  If a worker cannot be started (opening `index.html` straight off disk, for
+  example) the app quietly falls back to the synchronous implementation.
+- **Progress bar** — a bar at the bottom of the viewport reports what is
+  happening and how far along it is, driven by the worker's own progress
+  messages.
+- **Drag and drop** — drop an STL, OBJ or PLY straight onto the viewport. A
+  dropped file goes through exactly the same path as one chosen with the file
+  picker, and anything that is not a mesh is rejected with a clear message.
+
+### Recovering from mistakes
+
+- **History timeline** — every repair you apply is listed in the *History*
+  panel at the bottom of the drawer. Click any entry to jump straight back to
+  that state, or use <kbd>Ctrl</kbd>+<kbd>Z</kbd> and
+  <kbd>Ctrl</kbd>+<kbd>Y</kbd>.
+- **Error boundary** — if something goes wrong the app shows a recovery screen
+  with the error and a stack trace instead of going blank, and you can reload
+  or try again without losing your place.
+
 ### Mesh Doctor
 
 - **Diagnostics** — triangle/vertex/edge counts, watertight test, hole loops and

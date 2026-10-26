@@ -113,6 +113,8 @@ function App() {
   const [rimSmoothPasses, setRimSmoothPasses] = useState(2);
   const [drawerOpen, setDrawerOpen] = useState(true);
   const [showDisplay, setShowDisplay] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
 
   // Parameters
   const [importScale, setImportScale] = useState(1.0);
@@ -161,6 +163,20 @@ function App() {
     if (id === 4) return !!(shell && shell.stats);
     return false;
   }, [scanGeo, analysis, selStats.faces, shell]);
+
+  // The history timeline lives in a ref, so it is read through a memo that
+  // depends on the tick counter the ref bumps on every change.
+  const historyList = useMemo(() => {
+    const h = historyRef.current;
+    return h.list.map((snap, i) => ({
+      label: snap.label,
+      state: i === h.idx ? 'current' : i > h.idx ? 'future' : 'past'
+    }));
+  }, [historyTick]);
+  const historyPos = useMemo(() => {
+    const h = historyRef.current;
+    return { index: h.idx, total: h.list.length };
+  }, [historyTick]);
 
   const showToast = useCallback((msg, tone = 'info') => {
     setToast({ msg, tone, id: Date.now() });
@@ -520,6 +536,23 @@ function App() {
     showToast(`${dir < 0 ? 'Undo' : 'Redo'}: ${snap.label}`);
   }, [showToast]);
 
+  // Jumps straight to one entry in the timeline. Anything after the current
+  // point is dropped, which is what a normal undo would do anyway.
+  const jumpToHistory = useCallback((index) => {
+    const h = historyRef.current;
+    if (index < 0 || index >= h.list.length) return;
+    if (index === h.idx) return;
+    h.idx = index;
+    const snap = h.list[index];
+    setScanGeo(snap.geometry ? snap.geometry.clone() : null);
+    setScanRev((r) => r + 1);
+    setSelection(snap.mask ? Uint8Array.from(snap.mask) : null);
+    setShell(null);
+    setShellRev((r) => r + 1);
+    setHistoryTick((t) => t + 1);
+    showToast(`Jumped to: ${snap.label}`);
+  }, [showToast]);
+
   const applyGeometry = useCallback((label, geo, keepSelection = false) => {
     if (!geo) return;
     setScanGeo(geo);
@@ -764,6 +797,53 @@ function App() {
     }
   }, [boxRect, selectInRect, showToast]);
 
+  // Drag and drop handlers for file loading
+  const handleDragOver = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  }, []);
+
+  const handleDragLeave = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  }, []);
+
+  const handleDrop = useCallback((e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length === 0) return;
+
+    const file = files[0];
+    const ext = file.name.split('.').pop().toLowerCase();
+
+    if (!['stl', 'obj', 'ply'].includes(ext)) {
+      showToast('Unsupported file format. Please use STL, OBJ, or PLY.', 'error');
+      return;
+    }
+
+    // The same path as the file picker, so a dropped file behaves exactly
+    // like a chosen one: parse it, then load it.
+    setBusy(true);
+    progressManager.start(`Loading ${file.name}...`);
+    parseMeshFile(file)
+      .then((geo) => {
+        progressManager.update(0.9);
+        loadMesh(geo, file.name, importScale);
+      })
+      .catch((err) => {
+        showToast(`Could not read "${file.name}": ${err.message}`, 'error');
+      })
+      .finally(() => {
+        progressManager.complete();
+        setBusy(false);
+      });
+  }, [importScale, loadMesh, showToast]);
+
   // Projects the section points to screen space so they can be grabbed.
   const projectSectionPoints = useCallback(() => {
     const { camera, renderer } = threeRefs.current;
@@ -904,38 +984,63 @@ function App() {
   }, [scanGeo, tool, growAngle, brushRadius, pickRadius, pickAt, showToast, setSelection, sectionPts, sectionClosed, sectionSel, projectSectionPoints, moveSectionPoint]);
 
   // ------------------------------------------------------------ actions --
-  const runRepair = useCallback((label, fn) => {
+  // `fn` may return a geometry (sync) or a promise for one (worker). When a
+  // worker is used the UI stays responsive and the progress bar is driven by
+  // the worker's progress messages.
+  const runRepair = useCallback((label, fn, useWorker = false) => {
     if (!scanGeo) return;
     setBusy(true);
+    progressManager.start(label);
+    if (useWorker) {
+      workerManager.onProgress((p) => progressManager.update(p * 0.95));
+    }
     setTimeout(() => {
+      // The operation ends exactly once, whether it was sync or async.
+      const finish = () => {
+        progressManager.complete();
+        setBusy(false);
+      };
       try {
         const result = fn(scanGeo.clone());
+        if (result && typeof result.then === 'function') {
+          result
+            .then((geo) => {
+              progressManager.update(0.95);
+              if (geo) applyGeometry(label, geo);
+              showToast(`${label} applied`);
+            })
+            .catch((err) => {
+              showToast(`${label} failed: ${err.message}`, 'error');
+            })
+            .finally(finish);
+          return;
+        }
+        progressManager.update(0.9);
         if (result) applyGeometry(label, result);
         showToast(`${label} applied`);
       } catch (err) {
         showToast(`${label} failed: ${err.message}`, 'error');
-      } finally {
-        setBusy(false);
       }
+      finish();
     }, 20);
   }, [scanGeo, applyGeometry, showToast]);
 
   const doFillHoles = useCallback(() => {
-    runRepair('Fill holes', (geo) => {
-      const res = fillHoles(geo, { maxHoleArea, mode: fillMode, smoothIterations: 8 });
-      showToast(`Filled ${res.filled} hole(s), skipped ${res.skipped}`);
-      return res.geometry;
-    });
+    runRepair('Fill holes', (geo) => fillHolesAsync(geo, { maxHoleArea, mode: fillMode, smoothIterations: 8 })
+      .then((res) => {
+        showToast(`Filled ${res.filled} hole(s), skipped ${res.skipped}`);
+        return res.geometry;
+      }), true);
   }, [runRepair, maxHoleArea, fillMode, showToast]);
 
   const doSmooth = useCallback(() => {
-    runRepair('Taubin smooth', (geo) => taubinSmooth(geo, {
+    runRepair('Taubin smooth', (geo) => smoothAsync(geo, {
       iterations: smoothIters, lambda: smoothLambda, mu: -smoothLambda * 1.04, featureAngle
-    }));
+    }), true);
   }, [runRepair, smoothIters, smoothLambda, featureAngle]);
 
   const doDecimate = useCallback(() => {
-    runRepair('Decimate', (geo) => decimateQEM(geo, { targetRatio: decimateRatio, boundaryWeight: 8 }));
+    runRepair('Decimate', (geo) => decimateAsync(geo, { targetRatio: decimateRatio, boundaryWeight: 8 }), true);
   }, [runRepair, decimateRatio]);
 
   const doCullComponents = useCallback(() => {
@@ -978,32 +1083,39 @@ function App() {
       showToast(`Selection tidied for a clean rim - ${kept.toLocaleString()} faces`);
     }
     setBusy(true);
+    progressManager.start('Building shell...');
+    workerManager.onProgress((p) => progressManager.update(p * 0.95));
     setTimeout(() => {
-      try {
-        const res = buildShell(scanGeo, mask, {
-          thickness, clearance, side: shellSide, useMiter, miterLimit, rimStyle, rimSegments,
-          rimSmoothPasses: rimSmooth ? rimSmoothPasses : 0
+      buildShellAsync(scanGeo, mask, {
+        thickness, clearance, side: shellSide, useMiter, miterLimit, rimStyle, rimSegments,
+        rimSmoothPasses: rimSmooth ? rimSmoothPasses : 0
+      })
+        .then((res) => {
+          if (!res.geometry) {
+            showToast('Nothing selected - nothing to build', 'error');
+          } else {
+            setShell(res);
+            setShellRev((r) => r + 1);
+            showToast(`Shell over ${res.stats.selectedFaces.toLocaleString()} faces - ${res.stats.shellTriangles.toLocaleString()} tris, min wall ${res.stats.minWall.toFixed(2)} mm`);
+          }
+        })
+        .catch((err) => {
+          showToast(`Shell build failed: ${err.message}`, 'error');
+        })
+        .finally(() => {
+          progressManager.complete();
+          setBusy(false);
         });
-        if (!res.geometry) {
-          showToast('Nothing selected - nothing to build', 'error');
-        } else {
-          setShell(res);
-          setShellRev((r) => r + 1);
-          showToast(`Shell over ${res.stats.selectedFaces.toLocaleString()} faces - ${res.stats.shellTriangles.toLocaleString()} tris, min wall ${res.stats.minWall.toFixed(2)} mm`);
-        }
-      } catch (err) {
-        showToast(`Shell build failed: ${err.message}`, 'error');
-      } finally {
-        setBusy(false);
-      }
     }, 20);
   }, [scanGeo, thickness, clearance, shellSide, useMiter, miterLimit, rimStyle, rimSegments, rimSmooth, rimSmoothPasses, showToast]);
 
   const doBooleanSubtract = useCallback(() => {
     if (!shell || !shell.geometry || !scanGeo) return;
     setBusy(true);
+    progressManager.start('Applying boolean operation...');
     setTimeout(() => {
       try {
+        progressManager.update(0.5);
         const res = csgSubtractGeometries(shell.geometry, scanGeo);
         if (res) {
           setShell({ geometry: res, stats: { ...shell.stats, shellTriangles: res.index.count / 3 } });
@@ -1015,6 +1127,7 @@ function App() {
       } catch (err) {
         showToast(`Boolean failed: ${err.message}`, 'error');
       } finally {
+        progressManager.complete();
         setBusy(false);
       }
     }, 20);
@@ -1186,7 +1299,8 @@ function App() {
     const onKey = (e) => {
       if (e.target && ['INPUT', 'TEXTAREA'].includes(e.target.tagName)) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') { e.preventDefault(); restoreHistory(-1); }
-      else if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'))) { e.preventDefault(); restoreHistory(1); }      else if (e.key.toLowerCase() === 'g') setTool('grow');
+      else if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 'y' || (e.shiftKey && e.key.toLowerCase() === 'z'))) { e.preventDefault(); restoreHistory(1); }
+      else if (e.key.toLowerCase() === 'g') setTool('grow');
       else if (e.key.toLowerCase() === 'p') setTool('pick');
       else if (e.key.toLowerCase() === 's') setTool('section');
       else if (e.key.toLowerCase() === 'a') setTool('box');
@@ -1287,7 +1401,23 @@ function App() {
           onPointerDown={handlePointerDown}
           onPointerUp={handlePointerUp}
           onPointerLeave={handlePointerUp}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
         />
+        
+        {/* Drag and drop overlay */}
+        {isDragging && (
+          <div className="absolute inset-0 bg-cyan-500/10 border-2 border-dashed border-cyan-400 flex items-center justify-center z-20 pointer-events-none">
+            <div className="bg-[#0a0f1d] rounded-xl p-6 text-center">
+              <svg className="w-12 h-12 text-cyan-400 mx-auto mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
+              </svg>
+              <div className="text-lg font-bold text-cyan-300">Drop file to load</div>
+              <div className="text-sm text-slate-400 mt-1">STL, OBJ, or PLY</div>
+            </div>
+          </div>
+        )}
 
         {/* Area selection rubber band */}
         {boxRect && (
@@ -1779,6 +1909,64 @@ function App() {
                 </>
               )}
 
+              {/* History timeline - jump back to any point in the session */}
+              <div className="border-t border-slate-800">
+                <button
+                  onClick={() => setShowHistory(!showHistory)}
+                  className="w-full flex items-center gap-2 px-3 py-2.5 hover:bg-slate-800/50"
+                >
+                  <Icon name="undo" className="w-3.5 h-3.5 text-cyan-400" />
+                  <span className="text-[11px] font-bold uppercase tracking-wider text-slate-200 flex-1">History</span>
+                  <span className="text-[10px] font-mono text-slate-500">
+                    {historyPos.total ? `${historyPos.index + 1}/${historyPos.total}` : '0'}
+                  </span>
+                  <Icon name={showHistory ? 'chevronDown' : 'chevronRight'} className="w-3 h-3 text-slate-500" />
+                </button>
+                {showHistory && (
+                  <div className="px-3 pb-3">
+                    {historyList.length === 0 ? (
+                      <div className="text-[10px] text-slate-500">
+                        Nothing to undo yet. Every repair you apply is recorded here.
+                      </div>
+                    ) : (
+                      <ol className="relative space-y-0.5">
+                        {historyList.map((entry, i) => (
+                          <li key={i}>
+                            <button
+                              onClick={() => jumpToHistory(i)}
+                              title={entry.label}
+                              className={`w-full flex items-center gap-2 px-2 py-1 rounded-lg text-left transition ${
+                                entry.state === 'current'
+                                  ? 'bg-cyan-500/20 border border-cyan-400/40'
+                                  : 'hover:bg-slate-800/60 border border-transparent'
+                              }`}
+                            >
+                              <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                                entry.state === 'current' ? 'bg-cyan-400'
+                                  : entry.state === 'future' ? 'bg-slate-700'
+                                    : 'bg-emerald-500/70'
+                              }`} />
+                              <span className={`text-[10px] flex-1 truncate ${
+                                entry.state === 'current' ? 'text-cyan-200 font-bold'
+                                  : entry.state === 'future' ? 'text-slate-600'
+                                    : 'text-slate-400'
+                              }`}>
+                                {entry.label}
+                              </span>
+                              {entry.state === 'current' && <Icon name="check" className="w-3 h-3 text-cyan-400 shrink-0" />}
+                            </button>
+                          </li>
+                        ))}
+                      </ol>
+                    )}
+                    <div className="mt-2 text-[9px] text-slate-500 leading-relaxed">
+                      Click any step to jump back to it. <kbd className="font-mono text-slate-400">Ctrl+Z</kbd> undoes,
+                      <kbd className="font-mono text-slate-400"> Ctrl+Y</kbd> redoes.
+                    </div>
+                  </div>
+                )}
+              </div>
+
               {/* Display options - always available, never in the way */}
               <div className="border-t border-slate-800">
                 <button
@@ -1876,4 +2064,9 @@ function App() {
 }
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
-root.render(<App />);
+root.render(
+  <ErrorBoundary>
+    <App />
+    <ProgressDisplay />
+  </ErrorBoundary>
+);
