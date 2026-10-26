@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>MeshPlug Studio by Wayne Scicluna</title>
+
+  <!-- Inline favicon: a cyan plug/shield glyph -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23050a14'/%3E%3Cpath d='M16 5l9 4v7c0 6-4 9.5-9 11-5-1.5-9-5-9-11V9z' fill='none' stroke='%2334d399' stroke-width='2.4' stroke-linejoin='round'/%3E%3Cpath d='M12 15h8' stroke='%2338bdf8' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
+
+  <!-- Fonts: Inter & JetBrains Mono -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          },
+          screens: {
+            'xs': '400px',
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- React 18 & Babel -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <!-- Three.js r128 & OrbitControls -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+  <link rel="stylesheet" href="src/styles.css">
+</head>
+<body class="bg-[#05080f] text-slate-100 font-sans antialiased">
+  <div id="root" class="w-full h-full"></div>
+
+  <!-- Application modules: loaded in order, each compiled by Babel Standalone -->
+  <script type="text/babel" src="src/boot.js"></script>
+  <script type="text/babel" src="src/icons.js"></script>
+  <script type="text/babel" src="src/geometry.js"></script>
+  <script type="text/babel" src="src/parsers.js"></script>
+  <script type="text/babel" src="src/analysis.js"></script>
+  <script type="text/babel" src="src/repair.js"></script>
+  <script type="text/babel" src="src/offset.js"></script>
+  <script type="text/babel" src="src/selection.js"></script>
+  <script type="text/babel" src="src/csg.js"></script>
+  <script type="text/babel" src="src/app.js"></script>
+</body>
+</html>

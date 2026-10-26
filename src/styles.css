@@ -1,0 +1,106 @@
+:root {
+  --app-height: 100dvh;
+}
+html, body, #root {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  height: var(--app-height, 100dvh);
+  overflow: hidden;
+  background-color: #05080f;
+  user-select: none;
+  -webkit-user-select: none;
+}
+/* touch-action:none is applied to the 3D canvas only - putting it on
+   body/#root would kill touch scrolling inside the tool drawer. */
+.cad-canvas {
+  touch-action: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+button:active:not(:disabled) {
+  transform: scale(0.97);
+}
+.safe-top {
+  top: max(12px, calc(8px + env(safe-area-inset-top, 0px)));
+}
+.safe-bottom {
+  bottom: max(16px, calc(12px + env(safe-area-inset-bottom, 0px)));
+}
+.safe-sheet-pad {
+  padding-bottom: max(28px, calc(16px + env(safe-area-inset-bottom, 0px)));
+}
+.cad-glass {
+  background: rgba(10, 15, 26, 0.92);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+/* Custom Scrollbar for Lists */
+.cad-scroll::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+.cad-scroll::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.6);
+}
+.cad-scroll::-webkit-scrollbar-thumb {
+  background: rgba(56, 189, 248, 0.35);
+  border-radius: 9999px;
+}
+/* Range inputs: thin industrial slider */
+.mp-range {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 9999px;
+  background: #1e293b;
+  outline: none;
+}
+.mp-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 13px;
+  height: 13px;
+  border-radius: 9999px;
+  background: #38bdf8;
+  border: 2px solid #0f172a;
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.55);
+  cursor: pointer;
+}
+.mp-range::-moz-range-thumb {
+  width: 13px;
+  height: 13px;
+  border-radius: 9999px;
+  background: #38bdf8;
+  border: 2px solid #0f172a;
+  cursor: pointer;
+}
+/* Numeric field */
+.mp-field {
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: #e2e8f0;
+  outline: none;
+}
+.mp-field:focus {
+  border-color: #38bdf8;
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.15);
+}
+/* Animated pulse used by the live status LED */
+.mp-led {
+  animation: mp-pulse 1.6s ease-in-out infinite;
+}
+@keyframes mp-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
